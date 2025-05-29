@@ -57,6 +57,60 @@ except ImportError:
         print("Dummy generate_epub_from_folder_content called.")
         return False
 
+
+def parse_chapter_range(range_text, max_chapters):
+    """
+    解析章节范围字符串，返回章节索引列表
+    
+    支持的格式：
+    - "0-5" -> [0, 1, 2, 3, 4, 5]
+    - "1,3,5" -> [1, 3, 5] 
+    - "0-2,5,7-9" -> [0, 1, 2, 5, 7, 8, 9]
+    
+    Args:
+        range_text: 范围字符串
+        max_chapters: 最大章节数
+        
+    Returns:
+        list: 章节索引列表，失败返回None
+    """
+    if not range_text.strip():
+        return None
+        
+    try:
+        chapter_indices = set()
+        
+        # 按逗号分割
+        parts = [part.strip() for part in range_text.split(',')]
+        
+        for part in parts:
+            if '-' in part:
+                # 处理范围，如 "0-5"
+                range_parts = part.split('-')
+                if len(range_parts) != 2:
+                    return None
+                    
+                start = int(range_parts[0].strip())
+                end = int(range_parts[1].strip())
+                
+                if start > end:
+                    return None
+                    
+                for i in range(start, end + 1):
+                    if 0 <= i < max_chapters:
+                        chapter_indices.add(i)
+            else:
+                # 处理单个数字
+                index = int(part.strip())
+                if 0 <= index < max_chapters:
+                    chapter_indices.add(index)
+        
+        return sorted(list(chapter_indices))
+        
+    except ValueError:
+        return None
+
+
 class NetworkWorker(QThread):
     search_complete = pyqtSignal(list)
     chapters_ready = pyqtSignal(list, str)
@@ -165,11 +219,11 @@ class ChapterInfoDialog(QDialog):
         self.manga_data = manga_data
         self.chapters = chapters
         self.selected_chapter_indices = []
-        self.download_type = None  # 'all' or 'selected'
+        self.download_type = None  # 'all', 'selected', 'range'
         
         manga_name = manga_data.get("name", "未知漫画")
         self.setWindowTitle(f"《{manga_name}》章节信息")
-        self.setMinimumSize(600, 500)
+        self.setMinimumSize(700, 600)
         self.setup_ui()
     
     def setup_ui(self):
@@ -215,23 +269,49 @@ class ChapterInfoDialog(QDialog):
         self.all_download_radio = QRadioButton("下载全部章节")
         self.all_download_radio.setChecked(True)
         self.selected_download_radio = QRadioButton("下载选中的章节")
+        self.range_download_radio = QRadioButton("按范围下载")
         
         download_layout.addWidget(self.all_download_radio)
         download_layout.addWidget(self.selected_download_radio)
+        download_layout.addWidget(self.range_download_radio)
+        
+        # 范围输入框
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("  范围 (例: 0-5,10 表示第1-6章和第11章):"))
+        self.range_input = QLineEdit()
+        self.range_input.setPlaceholderText("例如: 0-5 或 1,3,5 或 0-2,8-10")
+        self.range_input.setEnabled(False)
+        range_layout.addWidget(self.range_input)
+        download_layout.addLayout(range_layout)
+        
+        # 范围说明
+        range_help = QLabel("  说明: 章节编号从0开始，0表示第1章，1表示第2章，以此类推")
+        range_help.setStyleSheet("color: #666; font-style: italic;")
+        download_layout.addWidget(range_help)
         
         download_group.setLayout(download_layout)
         layout.addWidget(download_group)
         
         # 按钮
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        button_layout = QHBoxLayout()
+        
+        self.add_to_queue_button = QPushButton("添加到下载队列")
+        self.add_to_queue_button.clicked.connect(self.add_to_queue)
+        
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.add_to_queue_button)
+        button_layout.addWidget(cancel_button)
+        button_layout.addStretch()
+        
+        layout.addWidget(QWidget())  # 添加间隔
+        layout.addLayout(button_layout)
         
         # 连接信号
         self.chapter_tree.itemSelectionChanged.connect(self.on_selection_changed)
+        self.range_download_radio.toggled.connect(self.on_range_radio_toggled)
+        self.range_input.textChanged.connect(self.validate_range_input)
     
     def on_selection_changed(self):
         """处理选择变化"""
@@ -239,21 +319,118 @@ class ChapterInfoDialog(QDialog):
         if selected_items:
             self.selected_download_radio.setEnabled(True)
             self.selected_chapter_indices = [item.data(0, Qt.ItemDataRole.UserRole) for item in selected_items]
+            # 自动选择多选模式并设置范围
+            if len(selected_items) > 1:
+                self.selected_download_radio.setChecked(True)
+                # 生成范围字符串
+                indices = sorted(self.selected_chapter_indices)
+                range_str = self._indices_to_range_string(indices)
+                self.range_input.setText(range_str)
+            elif len(selected_items) == 1:
+                self.selected_download_radio.setChecked(True)
+                self.range_input.setText(str(self.selected_chapter_indices[0]))
         else:
             self.selected_download_radio.setEnabled(False)
             self.selected_chapter_indices = []
     
-    def accept(self):
-        """确认下载"""
-        if self.all_download_radio.isChecked():
-            self.download_type = 'all'
-        elif self.selected_download_radio.isChecked() and self.selected_chapter_indices:
-            self.download_type = 'selected'
+    def _indices_to_range_string(self, indices):
+        """将索引列表转换为范围字符串"""
+        if not indices:
+            return ""
+        
+        indices = sorted(set(indices))
+        ranges = []
+        start = indices[0]
+        end = indices[0]
+        
+        for i in range(1, len(indices)):
+            if indices[i] == end + 1:
+                end = indices[i]
+            else:
+                if start == end:
+                    ranges.append(str(start))
+                else:
+                    ranges.append(f"{start}-{end}")
+                start = end = indices[i]
+        
+        # 处理最后一个范围
+        if start == end:
+            ranges.append(str(start))
         else:
-            QMessageBox.warning(self, "选择错误", "请选择要下载的章节或选择下载全部章节")
+            ranges.append(f"{start}-{end}")
+        
+        return ",".join(ranges)
+    
+    def on_range_radio_toggled(self, checked):
+        """处理范围单选按钮切换"""
+        self.range_input.setEnabled(checked)
+        if checked:
+            self.range_input.setFocus()
+    
+    def validate_range_input(self):
+        """验证范围输入"""
+        if not self.range_download_radio.isChecked():
+            return
+            
+        range_text = self.range_input.text().strip()
+        if not range_text:
+            self.range_input.setStyleSheet("")
+            return
+            
+        indices = parse_chapter_range(range_text, len(self.chapters))
+        if indices is not None:
+            self.range_input.setStyleSheet("color: green;")
+            # 在树形控件中高亮选中的章节
+            self.highlight_selected_chapters(indices)
+        else:
+            self.range_input.setStyleSheet("color: red;")
+            self.clear_chapter_highlights()
+    
+    def highlight_selected_chapters(self, indices):
+        """高亮选中的章节"""
+        self.clear_chapter_highlights()
+        
+        for i in range(self.chapter_tree.topLevelItemCount()):
+            item = self.chapter_tree.topLevelItem(i)
+            chapter_index = item.data(0, Qt.ItemDataRole.UserRole)
+            
+            if chapter_index in indices:
+                # 设置背景色为浅蓝色
+                item.setBackground(0, Qt.GlobalColor.lightGray)
+    
+    def clear_chapter_highlights(self):
+        """清除章节的高亮"""
+        for i in range(self.chapter_tree.topLevelItemCount()):
+            item = self.chapter_tree.topLevelItem(i)
+            item.setBackground(0, Qt.GlobalColor.white)
+    
+    def get_selected_options(self):
+        """获取选择的下载选项"""
+        if self.all_download_radio.isChecked():
+            return 'all', list(range(len(self.chapters)))
+        elif self.selected_download_radio.isChecked() and self.selected_chapter_indices:
+            return 'selected', self.selected_chapter_indices
+        elif self.range_download_radio.isChecked():
+            range_text = self.range_input.text().strip()
+            indices = parse_chapter_range(range_text, len(self.chapters))
+            if indices:
+                return 'range', indices
+            return None, []
+        
+        return None, []
+    
+    def add_to_queue(self):
+        """添加到下载队列"""
+        download_type, chapter_indices = self.get_selected_options()
+        
+        if download_type is None or not chapter_indices:
+            QMessageBox.warning(self, "选择错误", "请选择有效的下载选项")
             return
         
-        super().accept()
+        self.download_type = download_type
+        self.selected_chapter_indices = chapter_indices
+        self.accept()
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -609,13 +786,30 @@ class MainWindow(QMainWindow):
         
         dialog = ChapterInfoDialog(manga_data, chapters, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            # 根据用户选择进行下载
-            if dialog.download_type == 'all':
-                self._add_chapters_to_queue(chapters)
-            elif dialog.download_type == 'selected':
-                selected_chapters = [chapters[idx] for idx in dialog.selected_chapter_indices]
+            # 根据用户选择添加到队列
+            selected_chapters = [chapters[idx] for idx in dialog.selected_chapter_indices]
+            if selected_chapters:
                 self._add_chapters_to_queue(selected_chapters)
                 
+                # 生成描述
+                if dialog.download_type == 'all':
+                    desc = "全部章节"
+                elif len(selected_chapters) == 1:
+                    desc = f"第{dialog.selected_chapter_indices[0]+1}章"
+                else:
+                    first_idx = min(dialog.selected_chapter_indices)
+                    last_idx = max(dialog.selected_chapter_indices)
+                    if len(dialog.selected_chapter_indices) == last_idx - first_idx + 1:
+                        # 连续章节
+                        desc = f"第{first_idx+1}-{last_idx+1}章"
+                    else:
+                        # 非连续章节
+                        desc = f"共{len(selected_chapters)}章"
+                
+                manga_name = manga_data.get("name", "未知漫画")
+                self.statusBar.showMessage(f"已添加《{manga_name}》{desc}到下载队列", 3000)
+                
+        # 切换到队列标签页  
         self.tab_widget.setCurrentWidget(self.queue_tab)
 
     def _display_selected_manga_details(self, current_item):
@@ -959,4 +1153,4 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     main_win = MainWindow()
     main_win.show()
-    sys.exit(app.exec()) 
+    sys.exit(app.exec())
