@@ -103,6 +103,45 @@ def _chinese_to_arabic_for_vol(cn_str):
             
     return None
 
+
+def extract_file_number(filename):
+    """从文件名中提取编号用于排序"""
+    # 匹配开头的三位数编号，如 001_xxx.txt, 010_xxx.jpg
+    match = re.match(r'^(\d{3})_', filename)
+    if match:
+        return int(match.group(1))
+    
+    # 如果没有找到三位数编号，尝试匹配任意数字开头
+    match = re.match(r'^(\d+)', filename)
+    if match:
+        return int(match.group(1))
+    
+    # 如果没有找到数字，返回一个很大的数，让它排在后面
+    return 9999
+
+
+def group_files_by_number(file_paths):
+    """将文件按编号分组"""
+    grouped_files = {}
+    
+    for file_path in file_paths:
+        filename = os.path.basename(file_path)
+        file_number = extract_file_number(filename)
+        
+        if file_number not in grouped_files:
+            grouped_files[file_number] = {
+                'txt_files': [],
+                'image_files': []
+            }
+        
+        if filename.lower().endswith('.txt'):
+            grouped_files[file_number]['txt_files'].append(file_path)
+        elif filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+            grouped_files[file_number]['image_files'].append(file_path)
+    
+    return grouped_files
+
+
 class SimpleEpubGenerator:
     def __init__(self, title, author="Unknown Author", language="zh"):
         self.title = title
@@ -110,7 +149,7 @@ class SimpleEpubGenerator:
         self.language = language
         self.book_id = str(uuid.uuid4())
         self.chapters = []
-        self.images = []
+        self.images = []  # 存储章节内的图片
         self.cover_image_info = None
         
     def clean_text(self, text):
@@ -191,14 +230,67 @@ class SimpleEpubGenerator:
         
         return '\n'.join(processed_lines)
     
-    def text_to_html_paragraphs(self, text):
-        """将文本转换为HTML段落，保留原始换行并处理小标题。"""
-        if not text.strip():
+    def add_image(self, image_path, image_id=None):
+        """添加图片到EPUB中"""
+        if not os.path.isfile(image_path):
+            print(f"警告: 图片文件不存在: {image_path}")
+            return None
+        
+        filename = os.path.basename(image_path)
+        file_ext = filename.split('.')[-1].lower()
+        
+        # 确定媒体类型
+        mime_type_map = {
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'bmp': 'image/bmp'
+        }
+        
+        if file_ext not in mime_type_map:
+            print(f"警告: 不支持的图片格式: {file_ext}")
+            return None
+        
+        # 生成唯一的ID
+        if not image_id:
+            image_id = f"img_{len(self.images)}"
+        
+        # 生成EPUB内部的文件名
+        epub_filename = f"{image_id}.{file_ext}"
+        
+        image_info = {
+            'original_path': image_path,
+            'epub_path': f"Images/{epub_filename}",
+            'id': image_id,
+            'media_type': mime_type_map[file_ext],
+            'filename': epub_filename
+        }
+        
+        self.images.append(image_info)
+        print(f"添加图片: {filename} -> {epub_filename}")
+        return image_info
+    
+    def text_to_html_paragraphs(self, text, chapter_images=None):
+        """将文本转换为HTML段落，保留原始换行并处理小标题和图片。"""
+        if not text.strip() and not chapter_images:
             return "    <p> </p>"
+        
+        html_parts = []
+        
+        # 如果有图片，先添加图片
+        if chapter_images:
+            for img_info in chapter_images:
+                html_parts.append(f'    <div class="image-container">')
+                html_parts.append(f'        <img src="../{img_info["epub_path"]}" alt="插图" class="chapter-image"/>')
+                html_parts.append(f'    </div>')
+        
+        # 如果没有文本内容，只返回图片
+        if not text.strip():
+            return '\n'.join(html_parts) if html_parts else "    <p> </p>"
         
         # 按空行分割文本成段落块
         paragraph_blocks = re.split(r'\n\s*\n', text.strip())
-        html_parts = []
         
         for block_text in paragraph_blocks:
             block_text = block_text.strip()
@@ -223,8 +315,8 @@ class SimpleEpubGenerator:
     
     def _generate_unique_filename(self, title_str, base_prefix="chapter"):
         """根据标题生成一个在当前EPUB实例中唯一的文件名。"""
-        safe_filename_base = re.sub(r'[^\\w\\s-]', '', str(title_str)).strip()
-        safe_filename_base = re.sub(r'[-\\s]+', '-', safe_filename_base)
+        safe_filename_base = re.sub(r'[^\w\s-]', '', str(title_str)).strip()
+        safe_filename_base = re.sub(r'[-\s]+', '-', safe_filename_base)
         
         if not safe_filename_base:
             # 如果标题处理后为空（例如，标题全是特殊符号，或为空字符串）
@@ -250,7 +342,7 @@ class SimpleEpubGenerator:
                 return candidate_xhtml
             counter += 1
 
-    def add_raw_chapter(self, title: str, body_text: str):
+    def add_raw_chapter(self, title: str, body_text: str, chapter_images=None):
         """直接添加章节，使用明确的标题和正文。正文会被清理。"""
         if not title:
             print("警告: 尝试添加无标题章节 (raw), 已跳过。")
@@ -266,17 +358,20 @@ class SimpleEpubGenerator:
             'title': title,
             'content': cleaned_body, 
             'filename': chapter_filename,
-            'id': chapter_id
+            'id': chapter_id,
+            'images': chapter_images or []
         }
         self.chapters.append(chapter_info)
-        print(f"添加章节 (raw): {title} ({len(cleaned_body)} 字符)")
+        
+        image_count = len(chapter_images) if chapter_images else 0
+        print(f"添加章节 (raw): {title} ({len(cleaned_body)} 字符, {image_count} 张图片)")
         return True
 
-    def add_chapter_via_parser(self, full_content_string: str):
+    def add_chapter_via_parser(self, full_content_string: str, chapter_images=None):
         """通过内部解析器从完整内容字符串中提取标题和正文来添加章节。"""
         cleaned_content = self.clean_text(full_content_string)
-        if not cleaned_content.strip(): # 如果清理后内容为空
-            print("警告: 提供的章节内容 (via parser) 为空或仅含空白，已跳过。")
+        if not cleaned_content.strip() and not chapter_images: # 如果清理后内容为空且没有图片
+            print("警告: 提供的章节内容 (via parser) 为空或仅含空白，且无图片，已跳过。")
             return False
         
         title, main_content = self.parse_chapter_content(cleaned_content)
@@ -289,13 +384,16 @@ class SimpleEpubGenerator:
             'title': title,
             'content': main_content,
             'filename': chapter_filename,
-            'id': chapter_id
+            'id': chapter_id,
+            'images': chapter_images or []
         }
         self.chapters.append(chapter_info)
-        print(f"添加章节 (parsed): {title} ({len(main_content)} 字符)")
+        
+        image_count = len(chapter_images) if chapter_images else 0
+        print(f"添加章节 (parsed): {title} ({len(main_content)} 字符, {image_count} 张图片)")
         return True
         
-    def add_chapter_from_file(self, file_path):
+    def add_chapter_from_file(self, file_path, chapter_images=None):
         """从文件添加章节"""
         # 尝试多种编码读取文件
         content = None
@@ -314,7 +412,7 @@ class SimpleEpubGenerator:
             print(f"警告: 无法读取文件 {file_path}")
             return False
         
-        return self.add_chapter_via_parser(content)
+        return self.add_chapter_via_parser(content, chapter_images)
 
     def set_cover_image(self, image_path):
         """设置封面图片"""
@@ -347,7 +445,7 @@ class SimpleEpubGenerator:
     
     def generate_chapter_xhtml(self, chapter):
         """生成章节的XHTML内容"""
-        html_content = self.text_to_html_paragraphs(chapter['content'])
+        html_content = self.text_to_html_paragraphs(chapter['content'], chapter.get('images'))
         
         xhtml = f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
@@ -376,8 +474,14 @@ class SimpleEpubGenerator:
         """生成content.opf"""
         # 生成manifest项目
         manifest_items = []
+        
+        # 添加章节
         for chapter in self.chapters:
             manifest_items.append(f'    <item id="{chapter["id"]}" href="Text/{chapter["filename"]}" media-type="application/xhtml+xml"/>')
+        
+        # 添加章节内图片
+        for image in self.images:
+            manifest_items.append(f'    <item id="{image["id"]}" href="{image["epub_path"]}" media-type="{image["media_type"]}"/>')
         
         # 生成spine项目
         spine_items = []
@@ -486,9 +590,27 @@ h1 {
     padding-bottom: 0.5em;
 }
 
+h2 {
+    font-size: 1.2em;
+    font-weight: bold;
+    margin: 1em 0 0.5em 0;
+    color: #333;
+}
+
 p {
     margin: 0.8em 0;
     text-indent: 2em;
+}
+
+.image-container {
+    text-align: center;
+    margin: 1em 0;
+}
+
+.chapter-image {
+    max-width: 100%;
+    height: auto;
+    margin: 0.5em 0;
 }
 
 nav#toc h1 {
@@ -523,6 +645,7 @@ nav#toc a:hover {
         
         print(f"开始生成EPUB文件: {output_path}")
         print(f"包含 {len(self.chapters)} 个章节")
+        print(f"包含 {len(self.images)} 张章节内图片")
         
         # 确保输出目录存在
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -543,11 +666,13 @@ nav#toc a:hover {
                 
                 # 添加封面图片
                 if self.cover_image_info:
-                    # 确保 OEBPS/Images 目录存在于zip的结构中
-                    # (zipfile通常会自动创建，但明确一点没坏处)
-                    # 我们直接写入完整路径，zipfile会处理目录结构
                     epub_zip.write(self.cover_image_info['original_path'], f"OEBPS/{self.cover_image_info['epub_path']}")
                     print(f"添加封面图片: {self.cover_image_info['epub_path']}")
+
+                # 添加章节内图片
+                for image in self.images:
+                    epub_zip.write(image['original_path'], f"OEBPS/{image['epub_path']}")
+                    print(f"添加章节图片: {image['epub_path']}")
 
                 # 添加章节文件
                 for chapter in self.chapters:
@@ -638,26 +763,33 @@ def find_cover_image(directory_path):
 
 
 def discover_and_convert_novels(input_dir, output_dir, novel_title, author="Unknown Author", cover_image_path=None):
-    """发现并转换小说文件 - 单卷模式"""
+    """发现并转换小说文件 - 单卷模式，支持txt和图片文件"""
     if not os.path.isdir(input_dir):
         print(f"错误: 输入目录不存在 {input_dir}")
         return False
     
-    # 查找所有txt文件
-    txt_files = []
+    # 查找所有相关文件（txt和图片）
+    all_files = []
     for root, dirs, files in os.walk(input_dir):
         for file in files:
-            if file.lower().endswith('.txt'):
-                txt_files.append(os.path.join(root, file))
+            if file.lower().endswith(('.txt', '.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+                all_files.append(os.path.join(root, file))
     
-    if not txt_files:
-        print(f"错误: 在 {input_dir} 中未找到txt文件")
+    if not all_files:
+        print(f"错误: 在 {input_dir} 中未找到txt或图片文件")
         return False
     
-    # 按文件名排序
-    txt_files.sort(key=lambda x: os.path.basename(x))
+    # 按编号分组文件
+    grouped_files = group_files_by_number(all_files)
     
-    print(f"找到 {len(txt_files)} 个txt文件")
+    if not grouped_files:
+        print("错误: 没有找到带编号的文件")
+        return False
+    
+    # 按编号排序
+    sorted_numbers = sorted(grouped_files.keys())
+    
+    print(f"找到 {len(sorted_numbers)} 个编号组")
     
     # 创建EPUB生成器
     epub_gen = SimpleEpubGenerator(novel_title, author)
@@ -666,11 +798,57 @@ def discover_and_convert_novels(input_dir, output_dir, novel_title, author="Unkn
     if cover_image_path:
         epub_gen.set_cover_image(cover_image_path)
     
-    # 添加所有章节
-    for txt_file in txt_files:
-        success = epub_gen.add_chapter_from_file(txt_file)
-        if not success:
-            print(f"警告: 跳过文件 {txt_file}")
+    # 按编号顺序处理每组文件
+    for number in sorted_numbers:
+        group = grouped_files[number]
+        txt_files = group['txt_files']
+        image_files = group['image_files']
+        
+        # 处理图片
+        chapter_images = []
+        for img_path in sorted(image_files):  # 按文件名排序
+            img_info = epub_gen.add_image(img_path, f"img_{number}_{len(chapter_images)}")
+            if img_info:
+                chapter_images.append(img_info)
+        
+        # 处理文本文件
+        if txt_files:
+            # 如果有多个txt文件，合并内容
+            combined_content = ""
+            for txt_file in sorted(txt_files):  # 按文件名排序
+                try:
+                    content = None
+                    encodings = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'utf-16le']
+                    
+                    for encoding in encodings:
+                        try:
+                            with open(txt_file, 'r', encoding=encoding) as f:
+                                content = f.read()
+                            break
+                        except (UnicodeDecodeError, UnicodeError):
+                            continue
+                    
+                    if content:
+                        combined_content += content + "\n\n"
+                        print(f"读取文件: {os.path.basename(txt_file)}")
+                    else:
+                        print(f"警告: 无法读取文件 {txt_file}")
+                        
+                except Exception as e:
+                    print(f"警告: 读取文件 {txt_file} 时出错: {e}")
+            
+            if combined_content.strip():
+                success = epub_gen.add_chapter_via_parser(combined_content, chapter_images)
+                if not success:
+                    print(f"警告: 跳过编号 {number} 的文本内容")
+            elif chapter_images:
+                # 如果没有文本但有图片，创建一个只包含图片的章节
+                chapter_title = f"插图 {number:03d}"
+                epub_gen.add_raw_chapter(chapter_title, "", chapter_images)
+        elif chapter_images:
+            # 如果只有图片没有文本，创建一个只包含图片的章节
+            chapter_title = f"插图 {number:03d}"
+            epub_gen.add_raw_chapter(chapter_title, "", chapter_images)
     
     if not epub_gen.chapters:
         print("错误: 没有成功添加任何章节")
@@ -682,17 +860,15 @@ def discover_and_convert_novels(input_dir, output_dir, novel_title, author="Unkn
 
 
 def convert_single_volume(input_dir, output_dir, novel_title, author="Unknown Author"):
-    """转换单个卷（目录中的所有txt文件）"""
+    """转换单个卷（目录中的所有txt和图片文件）"""
     # 尝试查找封面图片
     cover_image_path = find_cover_image(input_dir)
     
-    # 直接调用 discover_and_convert_novels，并传递封面信息
-    # discover_and_convert_novels 将被修改以接受 cover_image_path
     return discover_and_convert_novels(input_dir, output_dir, novel_title, author, cover_image_path)
 
 
 def convert_multiple_volumes_to_single_epub(base_dir, output_dir, base_title, author="Unknown Author"):
-    """将多个卷合并转换为单个EPUB文件"""
+    """将多个卷合并转换为单个EPUB文件，支持txt和图片"""
     if not os.path.isdir(base_dir):
         print(f"错误: 基础目录不存在 {base_dir}")
         return False
@@ -733,30 +909,82 @@ def convert_multiple_volumes_to_single_epub(base_dir, output_dir, base_title, au
     for volume_name, volume_path in subdirs:
         print(f"\n处理卷: {volume_name}")
         
-        # 添加一个以卷名为标题的空白章节
-        epub_gen.add_raw_chapter(volume_name, "") # 使用卷名作为标题，内容为空
+        # 添加一个以卷名为标题的空白章节作为分隔
+        epub_gen.add_raw_chapter(volume_name, "")
         
-        # 查找该卷中的所有txt文件
-        txt_files = []
+        # 查找该卷中的所有相关文件
+        all_files = []
         for root, dirs, files in os.walk(volume_path):
             for file in files:
-                if file.lower().endswith('.txt'):
-                    txt_files.append(os.path.join(root, file))
+                if file.lower().endswith(('.txt', '.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+                    all_files.append(os.path.join(root, file))
         
-        if not txt_files:
-            print(f"警告: 在卷 {volume_name} 中未找到txt文件")
+        if not all_files:
+            print(f"警告: 在卷 {volume_name} 中未找到txt或图片文件")
             continue
         
-        # 按文件名排序
-        txt_files.sort(key=lambda x: os.path.basename(x))
+        # 按编号分组文件
+        grouped_files = group_files_by_number(all_files)
         
-        print(f"在卷 {volume_name} 中找到 {len(txt_files)} 个txt文件")
+        if not grouped_files:
+            print(f"警告: 在卷 {volume_name} 中没有找到带编号的文件")
+            continue
         
-        # 添加所有章节
-        for txt_file in txt_files:
-            success = epub_gen.add_chapter_from_file(txt_file)
-            if not success:
-                print(f"警告: 跳过文件 {txt_file}")
+        # 按编号排序
+        sorted_numbers = sorted(grouped_files.keys())
+        
+        print(f"在卷 {volume_name} 中找到 {len(sorted_numbers)} 个编号组")
+        
+        # 按编号顺序处理每组文件
+        for number in sorted_numbers:
+            group = grouped_files[number]
+            txt_files = group['txt_files']
+            image_files = group['image_files']
+            
+            # 处理图片
+            chapter_images = []
+            for img_path in sorted(image_files):
+                img_info = epub_gen.add_image(img_path, f"vol_{volume_name}_img_{number}_{len(chapter_images)}")
+                if img_info:
+                    chapter_images.append(img_info)
+            
+            # 处理文本文件
+            if txt_files:
+                # 合并同一编号的所有txt文件
+                combined_content = ""
+                for txt_file in sorted(txt_files):
+                    try:
+                        content = None
+                        encodings = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'utf-16le']
+                        
+                        for encoding in encodings:
+                            try:
+                                with open(txt_file, 'r', encoding=encoding) as f:
+                                    content = f.read()
+                                break
+                            except (UnicodeDecodeError, UnicodeError):
+                                continue
+                        
+                        if content:
+                            combined_content += content + "\n\n"
+                        else:
+                            print(f"警告: 无法读取文件 {txt_file}")
+                            
+                    except Exception as e:
+                        print(f"警告: 读取文件 {txt_file} 时出错: {e}")
+                
+                if combined_content.strip():
+                    success = epub_gen.add_chapter_via_parser(combined_content, chapter_images)
+                    if not success:
+                        print(f"警告: 跳过卷 {volume_name} 编号 {number} 的文本内容")
+                elif chapter_images:
+                    # 如果没有文本但有图片，创建一个只包含图片的章节
+                    chapter_title = f"{volume_name} - 插图 {number:03d}"
+                    epub_gen.add_raw_chapter(chapter_title, "", chapter_images)
+            elif chapter_images:
+                # 如果只有图片没有文本，创建一个只包含图片的章节
+                chapter_title = f"{volume_name} - 插图 {number:03d}"
+                epub_gen.add_raw_chapter(chapter_title, "", chapter_images)
     
     if not epub_gen.chapters:
         print("错误: 没有成功添加任何章节")
@@ -824,34 +1052,34 @@ def txt_to_epub(input_path, output_dir, title, author="Unknown Author", mode="au
         # 自动检测模式
         if os.path.isdir(input_path):
             # 检查目录中的内容
-            subdirs_with_txt = []
-            direct_txt_files = []
+            subdirs_with_content = []
+            direct_content_files = []
             
             for item in os.listdir(input_path):
                 item_path = os.path.join(input_path, item)
-                if os.path.isfile(item_path) and item.lower().endswith('.txt'):
-                    direct_txt_files.append(item_path)
+                if os.path.isfile(item_path) and item.lower().endswith(('.txt', '.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+                    direct_content_files.append(item_path)
                 elif os.path.isdir(item_path):
-                    # 检查子目录中是否有txt文件
-                    has_txt = False
+                    # 检查子目录中是否有相关文件
+                    has_content = False
                     for subitem in os.listdir(item_path):
-                        if subitem.lower().endswith('.txt'):
-                            has_txt = True
+                        if subitem.lower().endswith(('.txt', '.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+                            has_content = True
                             break
-                    if has_txt:
-                        subdirs_with_txt.append((item, item_path))
+                    if has_content:
+                        subdirs_with_content.append((item, item_path))
             
-            if direct_txt_files and not subdirs_with_txt:
-                print("检测到单层目录结构，所有txt文件在同一目录")
+            if direct_content_files and not subdirs_with_content:
+                print("检测到单层目录结构，所有文件在同一目录")
                 return convert_single_volume(input_path, output_dir, title, author)
-            elif subdirs_with_txt and not direct_txt_files:
+            elif subdirs_with_content and not direct_content_files:
                 print("检测到多卷结构，将合并为单个EPUB")
                 return convert_multiple_volumes_to_single_epub(input_path, output_dir, title, author)
-            elif subdirs_with_txt and direct_txt_files:
+            elif subdirs_with_content and direct_content_files:
                 print("检测到混合结构，优先处理子目录，将合并为单个EPUB")
                 return convert_multiple_volumes_to_single_epub(input_path, output_dir, title, author)
             else:
-                print("未找到任何txt文件")
+                print("未找到任何txt或图片文件")
                 return False
         else:
             print("错误: 输入路径必须是目录或TXT文件")
@@ -973,7 +1201,7 @@ def convert_single_file_to_epub(file_path, output_dir, title, author="Unknown Au
 
 
 if __name__ == "__main__":
+    # 测试示例
     single_file_path = '/Users/lilithgames/Downloads/novels/物语系列 Monster Season(物语系列十四)'
     target_folder = "/Users/lilithgames/Downloads/novels/"
-    txt_to_epub(single_file_path, target_folder, "xx", "xx")
-    
+    txt_to_epub(single_file_path, target_folder, "物语系列 Monster Season", "西尾维新")
