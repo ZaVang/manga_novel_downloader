@@ -21,17 +21,70 @@ from main import Wenku8Downloader
 from epub_converter import convert_single_volume, convert_multiple_volumes, txt_to_epub
 
 
+def parse_volume_range(range_text, max_volumes):
+    """
+    解析卷范围字符串，返回卷索引列表
+    
+    支持的格式：
+    - "0-2" -> [0, 1, 2]
+    - "1,3,5" -> [1, 3, 5] 
+    - "0-2,5,7-9" -> [0, 1, 2, 5, 7, 8, 9]
+    
+    Args:
+        range_text: 范围字符串
+        max_volumes: 最大卷数
+        
+    Returns:
+        list: 卷索引列表，失败返回None
+    """
+    if not range_text.strip():
+        return None
+        
+    try:
+        volume_indices = set()
+        
+        # 按逗号分割
+        parts = [part.strip() for part in range_text.split(',')]
+        
+        for part in parts:
+            if '-' in part:
+                # 处理范围，如 "0-2"
+                range_parts = part.split('-')
+                if len(range_parts) != 2:
+                    return None
+                    
+                start = int(range_parts[0].strip())
+                end = int(range_parts[1].strip())
+                
+                if start > end:
+                    return None
+                    
+                for i in range(start, end + 1):
+                    if 0 <= i < max_volumes:
+                        volume_indices.add(i)
+            else:
+                # 处理单个数字
+                index = int(part.strip())
+                if 0 <= index < max_volumes:
+                    volume_indices.add(index)
+        
+        return sorted(list(volume_indices))
+        
+    except ValueError:
+        return None
+
+
 class ChapterInfoDialog(QDialog):
     """章节信息对话框"""
     def __init__(self, novel_data, volumes, parent=None):
         super().__init__(parent)
         self.novel_data = novel_data
         self.volumes = volumes
-        self.selected_volume_index = None
-        self.download_type = None  # 'full' or 'volume'
+        self.selected_volume_indices = []
+        self.download_type = None  # 'full', 'volume', 'range'
         
         self.setWindowTitle(f"《{novel_data['name']}》章节信息")
-        self.setMinimumSize(600, 500)
+        self.setMinimumSize(700, 600)
         self.setup_ui()
     
     def setup_ui(self):
@@ -54,7 +107,7 @@ class ChapterInfoDialog(QDialog):
         
         total_chapters = 0
         for i, volume in enumerate(self.volumes):
-            volume_item = QTreeWidgetItem([volume['title'], f"{len(volume['chapters'])} 章节"])
+            volume_item = QTreeWidgetItem([f"第{i+1}卷: {volume['title']}", f"{len(volume['chapters'])} 章节"])
             volume_item.setData(0, Qt.ItemDataRole.UserRole, i)  # 存储卷索引
             
             for j, chapter in enumerate(volume['chapters']):
@@ -82,23 +135,53 @@ class ChapterInfoDialog(QDialog):
         self.full_download_radio = QRadioButton("下载整本小说")
         self.full_download_radio.setChecked(True)
         self.volume_download_radio = QRadioButton("下载选中的卷")
+        self.range_download_radio = QRadioButton("按范围下载")
         
         download_layout.addWidget(self.full_download_radio)
         download_layout.addWidget(self.volume_download_radio)
+        download_layout.addWidget(self.range_download_radio)
+        
+        # 范围输入框
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("  范围 (例: 0-2,5 表示第1-3卷和第6卷):"))
+        self.range_input = QLineEdit()
+        self.range_input.setPlaceholderText("例如: 0-2 或 1,3,5 或 0-1,4-6")
+        self.range_input.setEnabled(False)
+        range_layout.addWidget(self.range_input)
+        download_layout.addLayout(range_layout)
+        
+        # 范围说明
+        range_help = QLabel("  说明: 卷编号从0开始，0表示第1卷，1表示第2卷，以此类推")
+        range_help.setStyleSheet("color: #666; font-style: italic;")
+        download_layout.addWidget(range_help)
         
         download_group.setLayout(download_layout)
         layout.addWidget(download_group)
         
         # 按钮
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        button_layout = QHBoxLayout()
+        
+        self.add_to_queue_button = QPushButton("添加到下载队列")
+        self.add_to_queue_button.clicked.connect(self.add_to_queue)
+        
+        self.download_now_button = QPushButton("立即下载")
+        self.download_now_button.clicked.connect(self.download_now)
+        
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.add_to_queue_button)
+        button_layout.addWidget(self.download_now_button)
+        button_layout.addWidget(cancel_button)
+        button_layout.addStretch()
+        
+        layout.addWidget(QWidget())  # 添加间隔
+        layout.addLayout(button_layout)
         
         # 连接信号
         self.chapter_tree.itemSelectionChanged.connect(self.on_selection_changed)
+        self.range_download_radio.toggled.connect(self.on_range_radio_toggled)
+        self.range_input.textChanged.connect(self.validate_range_input)
     
     def on_selection_changed(self):
         """处理选择变化"""
@@ -107,22 +190,101 @@ class ChapterInfoDialog(QDialog):
             volume_index = current_item.data(0, Qt.ItemDataRole.UserRole)
             if volume_index is not None:
                 self.volume_download_radio.setEnabled(True)
-                self.selected_volume_index = volume_index
+                # 自动选择单卷下载并设置范围
+                self.volume_download_radio.setChecked(True)
+                self.range_input.setText(str(volume_index))
         else:
             self.volume_download_radio.setEnabled(False)
-            self.selected_volume_index = None
     
-    def accept(self):
-        """确认下载"""
-        if self.full_download_radio.isChecked():
-            self.download_type = 'full'
-        elif self.volume_download_radio.isChecked() and self.selected_volume_index is not None:
-            self.download_type = 'volume'
+    def on_range_radio_toggled(self, checked):
+        """处理范围单选按钮切换"""
+        self.range_input.setEnabled(checked)
+        if checked:
+            self.range_input.setFocus()
+    
+    def validate_range_input(self):
+        """验证范围输入"""
+        if not self.range_download_radio.isChecked():
+            return
+            
+        range_text = self.range_input.text().strip()
+        if not range_text:
+            self.range_input.setStyleSheet("")
+            return
+            
+        indices = parse_volume_range(range_text, len(self.volumes))
+        if indices is not None:
+            self.range_input.setStyleSheet("color: green;")
+            # 在树形控件中高亮选中的卷
+            self.highlight_selected_volumes(indices)
         else:
-            QMessageBox.warning(self, "选择错误", "请选择要下载的卷或选择下载整本小说")
+            self.range_input.setStyleSheet("color: red;")
+            self.clear_volume_highlights()
+    
+    def highlight_selected_volumes(self, indices):
+        """高亮选中的卷"""
+        self.clear_volume_highlights()
+        
+        for i in range(self.chapter_tree.topLevelItemCount()):
+            item = self.chapter_tree.topLevelItem(i)
+            volume_index = item.data(0, Qt.ItemDataRole.UserRole)
+            
+            if volume_index in indices:
+                # 设置背景色为浅蓝色
+                item.setBackground(0, Qt.GlobalColor.lightGray)
+                item.setBackground(1, Qt.GlobalColor.lightGray)
+    
+    def clear_volume_highlights(self):
+        """清除卷的高亮"""
+        for i in range(self.chapter_tree.topLevelItemCount()):
+            item = self.chapter_tree.topLevelItem(i)
+            item.setBackground(0, Qt.GlobalColor.white)
+            item.setBackground(1, Qt.GlobalColor.white)
+    
+    def get_selected_options(self):
+        """获取选择的下载选项"""
+        if self.full_download_radio.isChecked():
+            return 'full', []
+        elif self.volume_download_radio.isChecked():
+            current_item = self.chapter_tree.currentItem()
+            if current_item and current_item.parent() is None:
+                volume_index = current_item.data(0, Qt.ItemDataRole.UserRole)
+                if volume_index is not None:
+                    return 'volume', [volume_index]
+            return None, []
+        elif self.range_download_radio.isChecked():
+            range_text = self.range_input.text().strip()
+            indices = parse_volume_range(range_text, len(self.volumes))
+            if indices:
+                return 'range', indices
+            return None, []
+        
+        return None, []
+    
+    def add_to_queue(self):
+        """添加到下载队列"""
+        download_type, volume_indices = self.get_selected_options()
+        
+        if download_type is None:
+            QMessageBox.warning(self, "选择错误", "请选择有效的下载选项")
             return
         
-        super().accept()
+        self.download_type = 'queue'
+        self.selected_volume_indices = volume_indices
+        self.accept()
+    
+    def download_now(self):
+        """立即下载"""
+        download_type, volume_indices = self.get_selected_options()
+        
+        if download_type is None:
+            QMessageBox.warning(self, "选择错误", "请选择有效的下载选项")
+            return
+        
+        self.download_type = 'now'
+        self.selected_volume_indices = volume_indices
+        self.accept()
+
 
 class NetworkWorker(QThread):
     search_complete = pyqtSignal(dict)
@@ -171,7 +333,7 @@ class DownloadWorker(QThread):
     download_complete = pyqtSignal(bool, str)
     
     def __init__(self, downloader, novel_id, novel_name, output_dir, max_retries, 
-                 download_type='full', volume_index=None, parent=None):
+                 download_type='full', volume_indices=None, parent=None):
         super().__init__(parent)
         self.downloader = downloader
         self.novel_id = novel_id
@@ -179,7 +341,7 @@ class DownloadWorker(QThread):
         self.output_dir = output_dir
         self.max_retries = max_retries
         self.download_type = download_type
-        self.volume_index = volume_index
+        self.volume_indices = volume_indices or []
         self.is_cancelled = False
     
     def run(self):
@@ -195,21 +357,54 @@ class DownloadWorker(QThread):
                     output_dir=novel_specific_output_dir,
                     max_retries=self.max_retries
                 )
-            elif self.download_type == 'volume' and self.volume_index is not None:
-                self.progress_update.emit(f"开始下载小说卷 ID: {self.novel_id} 卷{self.volume_index+1} ({self.novel_name}) 到 {novel_specific_output_dir}")
-                success = self.downloader.download_volume(
-                    self.novel_id,
-                    self.volume_index,
-                    output_dir=novel_specific_output_dir,
-                    max_retries=self.max_retries
-                )
+            elif self.download_type in ['volume', 'range'] and self.volume_indices:
+                if len(self.volume_indices) == 1:
+                    # 单卷下载
+                    volume_index = self.volume_indices[0]
+                    self.progress_update.emit(f"开始下载小说卷 ID: {self.novel_id} 第{volume_index+1}卷 ({self.novel_name}) 到 {novel_specific_output_dir}")
+                    success = self.downloader.download_volume(
+                        self.novel_id,
+                        volume_index,
+                        output_dir=novel_specific_output_dir,
+                        max_retries=self.max_retries
+                    )
+                else:
+                    # 多卷下载
+                    volume_names = [f"第{i+1}卷" for i in self.volume_indices]
+                    self.progress_update.emit(f"开始下载小说多卷 ID: {self.novel_id} ({', '.join(volume_names)}) ({self.novel_name}) 到 {novel_specific_output_dir}")
+                    success = True
+                    
+                    for volume_index in self.volume_indices:
+                        if self.is_cancelled:
+                            break
+                            
+                        self.progress_update.emit(f"正在下载第{volume_index+1}卷...")
+                        volume_success = self.downloader.download_volume(
+                            self.novel_id,
+                            volume_index,
+                            output_dir=novel_specific_output_dir,
+                            max_retries=self.max_retries
+                        )
+                        
+                        if not volume_success:
+                            success = False
+                            self.progress_update.emit(f"第{volume_index+1}卷下载失败")
+                        else:
+                            self.progress_update.emit(f"第{volume_index+1}卷下载完成")
             else:
                 success = False
                 self.progress_update.emit("下载参数错误")
             
             if not self.is_cancelled:
                 if success:
-                    download_desc = "整本小说" if self.download_type == 'full' else f"第{self.volume_index+1}卷"
+                    if self.download_type == 'full':
+                        download_desc = "整本小说"
+                    elif len(self.volume_indices) == 1:
+                        download_desc = f"第{self.volume_indices[0]+1}卷"
+                    else:
+                        volume_names = [f"第{i+1}卷" for i in self.volume_indices]
+                        download_desc = f"({', '.join(volume_names)})"
+                    
                     self.download_complete.emit(True, f"小说《{self.novel_name}》{download_desc} 下载完成")
                 else:
                     self.download_complete.emit(False, f"小说《{self.novel_name}》下载失败")
@@ -241,6 +436,7 @@ class EpubExportWorker(QThread):
 
             txt_to_epub(self.input_novel_dir, self.output_epub_dir, self.novel_title, self.author)
             self.export_progress.emit(f"转换完成")
+            self.export_finished.emit(True, f"EPUB转换完成: {self.novel_title}")
 
         except Exception as e:
             self.export_finished.emit(False, f"EPUB 转换过程中发生错误: {e}")
@@ -940,11 +1136,11 @@ class MainWindow(QMainWindow):
                     if volumes:
                         dialog = ChapterInfoDialog(novel_data, volumes, self)
                         if dialog.exec() == QDialog.DialogCode.Accepted:
-                            # 根据用户选择进行下载
-                            if dialog.download_type == 'full':
-                                self._start_single_download(novel_data, 'full', None)
-                            elif dialog.download_type == 'volume':
-                                self._start_single_download(novel_data, 'volume', dialog.selected_volume_index)
+                            # 根据用户选择处理
+                            if dialog.download_type == 'queue':
+                                self._add_novel_to_queue(novel_data, dialog.selected_volume_indices)
+                            elif dialog.download_type == 'now':
+                                self._start_download_from_dialog(novel_data, dialog.selected_volume_indices)
                     else:
                         QMessageBox.warning(self, "错误", "无法获取章节信息")
                     self.status_bar.showMessage("准备就绪")
@@ -963,8 +1159,61 @@ class MainWindow(QMainWindow):
         self.network_worker.finished.connect(lambda: None)  # 这里不清空，因为可能有后续操作
         self.network_worker.start()
     
+    def _add_novel_to_queue(self, novel_data, volume_indices):
+        """将小说（带卷选择）添加到下载队列"""
+        # 检查是否已在队列中
+        for existing_item in self.download_queue:
+            if (existing_item['novel_data']['id'] == novel_data['id'] and 
+                existing_item.get('volume_indices') == volume_indices):
+                self.status_bar.showMessage("该下载任务已在队列中", 3000)
+                return
+        
+        # 创建下载任务
+        download_task = {
+            'novel_data': novel_data,
+            'volume_indices': volume_indices,
+            'download_type': 'full' if not volume_indices else ('volume' if len(volume_indices) == 1 else 'range')
+        }
+        
+        self.download_queue.append(download_task)
+        
+        # 生成描述
+        if not volume_indices:
+            desc = "整本小说"
+        elif len(volume_indices) == 1:
+            desc = f"第{volume_indices[0]+1}卷"
+        else:
+            volume_names = [f"第{i+1}卷" for i in volume_indices]
+            desc = f"({', '.join(volume_names)})"
+        
+        # 更新队列列表
+        queue_item = QListWidgetItem(
+            f"《{novel_data['name']}》 {desc} - 等待下载"
+        )
+        queue_item.setData(Qt.ItemDataRole.UserRole, download_task)
+        self.queue_list.addItem(queue_item)
+        
+        self.status_bar.showMessage(f"已添加《{novel_data['name']}》 {desc} 到下载队列", 3000)
+    
+    def _start_download_from_dialog(self, novel_data, volume_indices):
+        """从对话框开始下载"""
+        if self.download_worker and self.download_worker.isRunning():
+            reply = QMessageBox.question(
+                self, 
+                "下载中", 
+                "当前有下载任务正在进行，是否要停止当前下载并开始新的下载？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._pause_download()
+            else:
+                return
+        
+        download_type = 'full' if not volume_indices else ('volume' if len(volume_indices) == 1 else 'range')
+        self._start_single_download(novel_data, download_type, volume_indices)
+    
     def _add_to_download_queue(self):
-        """添加到下载队列"""
+        """添加到下载队列（整本小说）"""
         current_item = self.results_list.currentItem()
         if not current_item:
             return
@@ -972,26 +1221,11 @@ class MainWindow(QMainWindow):
         novel_data = current_item.data(Qt.ItemDataRole.UserRole)
         if not novel_data:
             return
-            
-        # 检查是否已在队列中
-        for existing_novel in self.download_queue:
-            if existing_novel['id'] == novel_data['id']:
-                self.status_bar.showMessage("该小说已在下载队列中", 3000)
-                return
-                
-        self.download_queue.append(novel_data)
         
-        # 更新队列列表
-        queue_item = QListWidgetItem(
-            f"《{novel_data['name']}》 (ID: {novel_data['id']}) - 等待下载"
-        )
-        queue_item.setData(Qt.ItemDataRole.UserRole, novel_data)
-        self.queue_list.addItem(queue_item)
-        
-        self.status_bar.showMessage(f"已添加《{novel_data['name']}》到下载队列", 3000)
+        self._add_novel_to_queue(novel_data, [])  # 空列表表示整本小说
     
     def _download_now(self):
-        """立即下载"""
+        """立即下载（整本小说）"""
         current_item = self.results_list.currentItem()
         if not current_item:
             return
@@ -1012,17 +1246,27 @@ class MainWindow(QMainWindow):
             else:
                 return
                 
-        self._start_single_download(novel_data, 'full', None)
+        self._start_single_download(novel_data, 'full', [])
     
-    def _start_single_download(self, novel_data, download_type='full', volume_index=None):
+    def _start_single_download(self, novel_data, download_type='full', volume_indices=None):
         """开始单个下载"""
         if not self.settings.get('output_dir'):
             QMessageBox.warning(self, "设置错误", "请先在设置中指定输出目录")
             self._open_settings_tab()
             return
-            
+        
+        volume_indices = volume_indices or []
         novel_name = novel_data.get('name', f"UnknownNovel_{novel_data['id']}")
-        download_desc = "整本小说" if download_type == 'full' else f"第{volume_index+1}卷"
+        
+        # 生成描述
+        if download_type == 'full':
+            download_desc = "整本小说"
+        elif len(volume_indices) == 1:
+            download_desc = f"第{volume_indices[0]+1}卷"
+        else:
+            volume_names = [f"第{i+1}卷" for i in volume_indices]
+            download_desc = f"({', '.join(volume_names)})"
+        
         self.current_download_label.setText(f"当前下载: 《{novel_name}》{download_desc}")
         self.download_progress_bar.setRange(0, 0)  # 不确定进度
         
@@ -1033,7 +1277,7 @@ class MainWindow(QMainWindow):
             self.settings['output_dir'],
             self.settings.get('max_retries', 3),
             download_type,
-            volume_index,
+            volume_indices,
             parent=self
         )
         
@@ -1058,12 +1302,15 @@ class MainWindow(QMainWindow):
             return
             
         # 取出队列中的第一个
-        novel_data = self.download_queue.pop(0)
+        download_task = self.download_queue.pop(0)
+        novel_data = download_task['novel_data']
+        volume_indices = download_task['volume_indices']
+        download_type = download_task['download_type']
         
         # 更新队列显示
         self._update_queue_display()
         
-        self._start_single_download(novel_data, 'full', None)
+        self._start_single_download(novel_data, download_type, volume_indices)
     
     def _pause_download(self):
         """暂停/取消下载"""
@@ -1097,11 +1344,23 @@ class MainWindow(QMainWindow):
     def _update_queue_display(self):
         """更新队列显示"""
         self.queue_list.clear()
-        for i, novel_data in enumerate(self.download_queue):
+        for i, download_task in enumerate(self.download_queue):
+            novel_data = download_task['novel_data']
+            volume_indices = download_task['volume_indices']
+            
+            # 生成描述
+            if not volume_indices:
+                desc = "整本小说"
+            elif len(volume_indices) == 1:
+                desc = f"第{volume_indices[0]+1}卷"
+            else:
+                volume_names = [f"第{i+1}卷" for i in volume_indices]
+                desc = f"({', '.join(volume_names)})"
+            
             queue_item = QListWidgetItem(
-                f"{i+1}. 《{novel_data['name']}》 (ID: {novel_data['id']}) - 等待下载"
+                f"{i+1}. 《{novel_data['name']}》 {desc} - 等待下载"
             )
-            queue_item.setData(Qt.ItemDataRole.UserRole, novel_data)
+            queue_item.setData(Qt.ItemDataRole.UserRole, download_task)
             self.queue_list.addItem(queue_item)
     
     def _handle_download_progress(self, message):
