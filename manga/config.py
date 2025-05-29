@@ -1,29 +1,22 @@
 import datetime
+import os
 
 SETTINGS = {
-    "download_path": None,
+    "download_path": os.path.expanduser("~/Downloads/manga"),
     "authorization": None,
-    "use_oversea_cdn": None,
-    "use_webp": None,
+    "use_oversea_cdn": "0",
+    "use_webp": "1",
     "proxies": None,
-    "api_url": None,
-    "HC": None,
-    "CBZ": None,
+    "api_url": "mangacopy.com",
+    "HC": "1",
+    "CBZ": False,
     "cbz_path": None,
     "api_time": 0.0,
-    "API_COUNTER": 0,
-    "loginPattern": "0",
+    "API_COUNTER": 6,
+    "loginPattern": "3",
     "salt": None,
     "username": None,
     "password": None,
-    "send_to_kindle": None,
-    "kcc_cmd": None,
-    "email_address": None,
-    "email_passwd": None,
-    "kindle_address": None,
-    "email_smtp_address": None,
-    "UA": None,
-    "AUTO_EPUB": True
 }
 
 # 全局化设置,备份,防止命令行参数导致设置错位
@@ -43,13 +36,6 @@ OG_SETTINGS = {
     "salt": None,
     "username": None,
     "password": None,
-    "send_to_kindle": None,
-    "kcc_cmd": None,
-    "email_address": None,
-    "email_passwd": None,
-    "kindle_address": None,
-    "email_smtp_address": None,
-    "UA": None,
 }
 
 # 全局化headers，节省空间

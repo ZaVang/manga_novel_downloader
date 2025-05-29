@@ -4,10 +4,7 @@ import config
 
 
 def save_settings(settings):
-    home_dir = os.path.expanduser("~")
-    if not os.path.exists(os.path.join(home_dir, '.copymanga-downloader/')):
-        os.mkdir(os.path.join(home_dir, '.copymanga-downloader/'))
-    settings_path = os.path.join(home_dir, ".copymanga-downloader/settings.json")
+    settings_path = os.path.join(os.getcwd(), "manga/manga_settings.json")
     # 写入settings.json文件
     with open(settings_path, "w") as f:
         json.dump(settings, f)
@@ -15,8 +12,7 @@ def save_settings(settings):
 
 def load_settings():
     # 获取用户目录的路径
-    home_dir = os.path.expanduser("~")
-    settings_path = os.path.join(home_dir, ".copymanga-downloader/settings.json")
+    settings_path = os.path.join(os.getcwd(), "manga/manga_settings.json")
     # 检查是否有文件
     if not os.path.exists(settings_path):
         return False, "settings.json文件不存在"

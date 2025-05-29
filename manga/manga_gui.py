@@ -3,47 +3,29 @@ import os
 import shutil
 import re
 import requests
+import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, 
                              QMenuBar, QStatusBar, QLineEdit, QPushButton, QListWidget, QTabWidget,
                              QGroupBox, QFormLayout, QSpinBox, QCheckBox, QComboBox, QFileDialog,
-                             QListWidgetItem
+                             QListWidgetItem, QTextEdit, QProgressBar, QMessageBox, QDialog,
+                             QDialogButtonBox, QTreeWidget, QTreeWidgetItem, QRadioButton
 )
 from PyQt6.QtGui import QAction, QPixmap
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
 
-# --- Attempt to import project's config and settings modules ---
-CONFIG_LOADED = False
-try:
-    import config # Your project's config module
-    from settings import load_settings, save_settings # Your project's settings functions
-    CONFIG_LOADED = True
-    print("Successfully imported project's config and settings modules.")
-except ImportError as e:
-    print(f"Warning: Could not import project's config/settings.py: {e}. GUI will use its own defaults and saving will be limited.")
-    # Define dummy functions if not loaded, so GUI can run with limited functionality
-    class DummyConfig:
-        SETTINGS = {}
-        API_HEADER = {}
-        PROXIES = {}
-    config = DummyConfig()
-    def load_settings(): return False, "Config module not loaded"
-    def save_settings(s): print("Dummy save_settings called. Settings not saved to file.")
 
-# --- Initialize GUI's snapshot of settings ---
-# Call load_settings() once to populate config module if possible
-if CONFIG_LOADED:
-    load_success, load_msg = load_settings() # This should populate config.SETTINGS etc.
-    if not load_success:
-        print(f"Project's load_settings() failed: {load_msg}. Using GUI defaults where necessary.")
-   
+import config
+from settings import load_settings, save_settings
+load_success, load_msg = load_settings()
+
 INITIAL_SETTINGS = config.SETTINGS.copy() if hasattr(config, 'SETTINGS') and config.SETTINGS else {}
 INITIAL_API_HEADER = config.API_HEADER.copy() if hasattr(config, 'API_HEADER') and config.API_HEADER else {}
 INITIAL_PROXIES = config.PROXIES.copy() if hasattr(config, 'PROXIES') and config.PROXIES else {}
 
 def ensure_gui_defaults(settings_dict):
     defaults = {
-        'download_path': os.path.expanduser("~/Downloads/manga_and_novel"), 
-        'export_path': os.path.expanduser("~/Downloads/manga_and_novel/Exported"), 
+        'download_path': os.path.expanduser("~/Downloads/manga"), 
+        'export_path': os.path.expanduser("~/Downloads/manga"), 
         'api_url': "copymanga.site",
         'epub_filename_prefix': "",
         'epub_language': "zh-CN",
@@ -176,18 +158,124 @@ class ExportWorker(QThread):
             except Exception as e: import traceback; self.progress.emit(f"导出EPUB时发生严重错误: {e}"); traceback.print_exc(); self.finished.emit(False, f"EPUB 导出时发生严重错误: {e}", "")
         else: self.finished.emit(False, f"不支持的导出格式: {self.export_format}", "")
 
+class ChapterInfoDialog(QDialog):
+    """章节信息对话框"""
+    def __init__(self, manga_data, chapters, parent=None):
+        super().__init__(parent)
+        self.manga_data = manga_data
+        self.chapters = chapters
+        self.selected_chapter_indices = []
+        self.download_type = None  # 'all' or 'selected'
+        
+        manga_name = manga_data.get("name", "未知漫画")
+        self.setWindowTitle(f"《{manga_name}》章节信息")
+        self.setMinimumSize(600, 500)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 漫画信息
+        info_group = QGroupBox("漫画信息")
+        info_layout = QFormLayout()
+        info_layout.addRow("标题:", QLabel(self.manga_data.get("name", "未知漫画")))
+        authors = self.manga_data.get("author", [])
+        author_str = ", ".join([a.get("name","") for a in authors]) if isinstance(authors,list) and authors else "未知"
+        info_layout.addRow("作者:", QLabel(author_str))
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+        
+        # 章节列表
+        chapters_group = QGroupBox("章节信息")
+        chapters_layout = QVBoxLayout()
+        
+        self.chapter_tree = QTreeWidget()
+        self.chapter_tree.setHeaderLabels(["章节名称"])
+        self.chapter_tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        
+        for i, chapter in enumerate(self.chapters):
+            item = QTreeWidgetItem([f"{i+1:03d}. {chapter.get('name', '未知章节')}"])
+            item.setData(0, Qt.ItemDataRole.UserRole, i)  # 存储章节索引
+            self.chapter_tree.addTopLevelItem(item)
+        
+        chapters_layout.addWidget(self.chapter_tree)
+        
+        # 统计信息
+        stats_label = QLabel(f"总计: {len(self.chapters)} 章节")
+        stats_label.setStyleSheet("font-weight: bold; color: #666;")
+        chapters_layout.addWidget(stats_label)
+        
+        chapters_group.setLayout(chapters_layout)
+        layout.addWidget(chapters_group)
+        
+        # 下载选项
+        download_group = QGroupBox("下载选项")
+        download_layout = QVBoxLayout()
+        
+        self.all_download_radio = QRadioButton("下载全部章节")
+        self.all_download_radio.setChecked(True)
+        self.selected_download_radio = QRadioButton("下载选中的章节")
+        
+        download_layout.addWidget(self.all_download_radio)
+        download_layout.addWidget(self.selected_download_radio)
+        
+        download_group.setLayout(download_layout)
+        layout.addWidget(download_group)
+        
+        # 按钮
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # 连接信号
+        self.chapter_tree.itemSelectionChanged.connect(self.on_selection_changed)
+    
+    def on_selection_changed(self):
+        """处理选择变化"""
+        selected_items = self.chapter_tree.selectedItems()
+        if selected_items:
+            self.selected_download_radio.setEnabled(True)
+            self.selected_chapter_indices = [item.data(0, Qt.ItemDataRole.UserRole) for item in selected_items]
+        else:
+            self.selected_download_radio.setEnabled(False)
+            self.selected_chapter_indices = []
+    
+    def accept(self):
+        """确认下载"""
+        if self.all_download_radio.isChecked():
+            self.download_type = 'all'
+        elif self.selected_download_radio.isChecked() and self.selected_chapter_indices:
+            self.download_type = 'selected'
+        else:
+            QMessageBox.warning(self, "选择错误", "请选择要下载的章节或选择下载全部章节")
+            return
+        
+        super().accept()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("拷贝漫画下载器")
-        self.setGeometry(100, 100, 900, 700)
-        self.export_worker = None; self.main_network_worker = None
+        self.setGeometry(100, 100, 1200, 800)
+        self.export_worker = None
+        self.main_network_worker = None
         self.cover_fetch_workers = {}
-        self.current_manga_chapters_data = {}; self.current_search_results_map = {}
-        self.results_list_context = "manga_search"; self.current_manga_for_chapters_path_word = None
-        self.download_queue = []; self.active_download_workers = {}
+        self.current_manga_chapters_data = {}
+        self.current_search_results_map = {}
+        self.results_list_context = "manga_search"
+        self.current_manga_for_chapters_path_word = None
+        
+        self.download_queue = []
+        self.active_download_workers = {}
         self.max_concurrent_downloads = INITIAL_SETTINGS.get('max_concurrent_downloads', 3)
-        self._create_menu_bar(); self._create_status_bar(); self._init_ui(); self._load_app_settings()
+        
+        self._create_menu_bar()
+        self._create_status_bar()
+        self._init_ui()
+        self._load_app_settings()
 
     def _create_menu_bar(self):
         menu_bar = self.menuBar()
@@ -200,10 +288,25 @@ class MainWindow(QMainWindow):
     def _create_status_bar(self): self.statusBar = QStatusBar(); self.setStatusBar(self.statusBar); self.statusBar.showMessage("准备就绪")
 
     def _init_ui(self):
-        self.tab_widget = QTabWidget(); self.setCentralWidget(self.tab_widget)
-        self.downloader_tab = QWidget(); self.tab_widget.addTab(self.downloader_tab, "下载器"); self._setup_downloader_tab()
-        self.export_tab = QWidget(); self.tab_widget.addTab(self.export_tab, "EPUB 导出"); self._setup_export_tab()
-        self.settings_tab = QWidget(); self.tab_widget.addTab(self.settings_tab, "设置"); self._setup_settings_tab()
+        self.tab_widget = QTabWidget()
+        self.setCentralWidget(self.tab_widget)
+        
+        self.downloader_tab = QWidget()
+        self.tab_widget.addTab(self.downloader_tab, "下载器")
+        self._setup_downloader_tab()
+        
+        # 下载队列标签页
+        self.queue_tab = QWidget()
+        self.tab_widget.addTab(self.queue_tab, "下载队列")
+        self._setup_queue_tab()
+        
+        self.export_tab = QWidget()
+        self.tab_widget.addTab(self.export_tab, "EPUB 导出")
+        self._setup_export_tab()
+        
+        self.settings_tab = QWidget()
+        self.tab_widget.addTab(self.settings_tab, "设置")
+        self._setup_settings_tab()
 
     def _load_app_settings(self):
         self.download_destination_edit.setText(INITIAL_SETTINGS.get('download_path'))
@@ -226,7 +329,6 @@ class MainWindow(QMainWindow):
         self.statusBar.showMessage("设置已加载", 2000)
 
     def _save_app_settings(self):
-        if not CONFIG_LOADED: self.statusBar.showMessage("错误: 项目配置模块未加载，无法保存。", 5000); return
         gui_settings_map = {
             "download_path": self.download_destination_edit.text(), "export_path": self.export_destination_edit.text(),
             "api_url": self.api_url_edit.text(), "use_webp": "1" if self.use_webp_checkbox.isChecked() else "0",
@@ -252,47 +354,133 @@ class MainWindow(QMainWindow):
 
     def _setup_downloader_tab(self):
         layout = QVBoxLayout(self.downloader_tab)
-        search_group = QGroupBox("漫画搜索"); search_layout = QHBoxLayout()
-        self.search_input = QLineEdit(); self.search_input.setPlaceholderText("输入漫画名称..."); self.search_input.returnPressed.connect(self._trigger_search)
-        self.search_button = QPushButton("搜索"); self.search_button.clicked.connect(self._trigger_search)
-        search_layout.addWidget(self.search_input); search_layout.addWidget(self.search_button); search_group.setLayout(search_layout); layout.addWidget(search_group)
+        
+        search_group = QGroupBox("漫画搜索")
+        search_layout = QHBoxLayout()
+        
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("输入漫画名称...")
+        self.search_input.returnPressed.connect(self._trigger_search)
+        
+        self.search_button = QPushButton("搜索")
+        self.search_button.clicked.connect(self._trigger_search)
+        
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_button)
+        
+        search_group.setLayout(search_layout)
+        layout.addWidget(search_group)
         
         middle_layout = QHBoxLayout()
-        self.results_group_box = QGroupBox("搜索结果") 
+        
+        self.results_group_box = QGroupBox("搜索结果 (双击漫画查看章节)") 
         results_v_layout = QVBoxLayout()
+        
         self.results_list_widget = QListWidget()
         self.results_list_widget.currentItemChanged.connect(self._handle_results_list_selection_changed)
         self.results_list_widget.itemDoubleClicked.connect(self._handle_results_list_double_click)
-        results_v_layout.addWidget(self.results_list_widget); self.results_group_box.setLayout(results_v_layout)
+        
+        results_v_layout.addWidget(self.results_list_widget)
+        self.results_group_box.setLayout(results_v_layout)
         middle_layout.addWidget(self.results_group_box, 2)
 
         details_group = QGroupBox("漫画详情")
         details_v_layout = QVBoxLayout()
+        
         self.manga_cover_label = QLabel("封面图片")
-        self.manga_cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.manga_cover_label.setMinimumSize(200,280); self.manga_cover_label.setStyleSheet("border: 1px solid gray; background-color: #f0f0f0;")
+        self.manga_cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.manga_cover_label.setMinimumSize(200,280)
+        self.manga_cover_label.setStyleSheet("border: 1px solid gray; background-color: #f0f0f0;")
         
         self.manga_title_label = QLabel("标题")
-        self.manga_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.manga_title_label.setStyleSheet("font-weight: bold; font-size: 14pt;")
+        self.manga_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.manga_title_label.setStyleSheet("font-weight: bold; font-size: 14pt;")
         
         self.manga_author_label = QLabel("作者: 未知")
         
         self.manga_description_text = QLabel("简介将显示在此处...")
-        self.manga_description_text.setWordWrap(True); self.manga_description_text.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.manga_description_text.setWordWrap(True)
+        self.manga_description_text.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         details_v_layout.addWidget(self.manga_cover_label)
         details_v_layout.addWidget(self.manga_title_label) 
         details_v_layout.addWidget(self.manga_author_label) 
         details_v_layout.addWidget(self.manga_description_text, 1)
-        details_group.setLayout(details_v_layout); middle_layout.addWidget(details_group, 1)
+        
+        details_group.setLayout(details_v_layout)
+        middle_layout.addWidget(details_group, 1)
+        
         layout.addLayout(middle_layout)
         
-        download_controls_group = QGroupBox("下载控制"); dc_layout = QFormLayout()
-        dl_dest_layout = QHBoxLayout(); self.download_destination_edit = QLineEdit(); self.browse_download_destination_button = QPushButton("浏览..."); self.browse_download_destination_button.clicked.connect(self._browse_download_destination)
-        dl_dest_layout.addWidget(self.download_destination_edit); dl_dest_layout.addWidget(self.browse_download_destination_button); dc_layout.addRow("下载目标路径:", dl_dest_layout)
-        self.chapter_range_input = QLineEdit(); self.chapter_range_input.setPlaceholderText("例如: 1-5, 8 (留空则下载选中)"); dc_layout.addRow("下载范围:", self.chapter_range_input)
-        dl_buttons_layout = QHBoxLayout(); self.download_selected_button = QPushButton("下载选中章节"); self.download_all_button = QPushButton("下载全部章节")
-        self.download_selected_button.clicked.connect(self._add_selected_chapters_to_download_queue); self.download_all_button.clicked.connect(self._add_all_chapters_to_download_queue)
-        dl_buttons_layout.addWidget(self.download_selected_button); dl_buttons_layout.addWidget(self.download_all_button); dc_layout.addRow(dl_buttons_layout); download_controls_group.setLayout(dc_layout); layout.addWidget(download_controls_group)
+        # 下载目标路径
+        dl_dest_group = QGroupBox("下载设置")
+        dl_dest_layout = QFormLayout()
+        
+        dl_path_layout = QHBoxLayout()
+        self.download_destination_edit = QLineEdit()
+        self.browse_download_destination_button = QPushButton("浏览...")
+        self.browse_download_destination_button.clicked.connect(self._browse_download_destination)
+        
+        dl_path_layout.addWidget(self.download_destination_edit)
+        dl_path_layout.addWidget(self.browse_download_destination_button)
+        
+        dl_dest_layout.addRow("下载目标路径:", dl_path_layout)
+        dl_dest_group.setLayout(dl_dest_layout)
+        
+        layout.addWidget(dl_dest_group)
+
+    def _setup_queue_tab(self):
+        layout = QVBoxLayout(self.queue_tab)
+        
+        # 队列控制
+        queue_control_group = QGroupBox("队列控制")
+        queue_control_layout = QHBoxLayout()
+        
+        self.start_queue_button = QPushButton("开始队列下载")
+        self.start_queue_button.clicked.connect(self._start_queue_download)
+        
+        self.pause_queue_button = QPushButton("暂停下载")
+        self.pause_queue_button.clicked.connect(self._pause_download)
+        self.pause_queue_button.setEnabled(False)
+        
+        self.clear_queue_button = QPushButton("清空队列")
+        self.clear_queue_button.clicked.connect(self._clear_queue)
+        
+        queue_control_layout.addWidget(self.start_queue_button)
+        queue_control_layout.addWidget(self.pause_queue_button)
+        queue_control_layout.addWidget(self.clear_queue_button)
+        queue_control_layout.addStretch()
+        
+        queue_control_group.setLayout(queue_control_layout)
+        layout.addWidget(queue_control_group)
+        
+        # 下载队列列表
+        queue_list_group = QGroupBox("下载队列")
+        queue_list_layout = QVBoxLayout()
+        
+        self.queue_list = QListWidget()
+        
+        queue_list_layout.addWidget(self.queue_list)
+        queue_list_group.setLayout(queue_list_layout)
+        layout.addWidget(queue_list_group)
+        
+        # 下载进度
+        progress_group = QGroupBox("下载进度")
+        progress_layout = QVBoxLayout()
+        
+        self.current_download_label = QLabel("当前下载: 无")
+        self.download_progress_bar = QProgressBar()
+        self.download_status_text = QTextEdit()
+        self.download_status_text.setMaximumHeight(150)
+        self.download_status_text.setReadOnly(True)
+        
+        progress_layout.addWidget(self.current_download_label)
+        progress_layout.addWidget(self.download_progress_bar)
+        progress_layout.addWidget(QLabel("下载日志:"))
+        progress_layout.addWidget(self.download_status_text)
+        
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
 
     def _setup_export_tab(self):
         layout = QVBoxLayout(self.export_tab); export_controls_group = QGroupBox("EPUB 导出控制"); ec_layout = QFormLayout()
@@ -363,201 +551,368 @@ class MainWindow(QMainWindow):
                 pass
 
     def _handle_results_list_double_click(self, item):
-        if not item: return
-        if self.results_list_context == "manga_search": self._fetch_chapters_for_selected_manga(item)
-        elif self.results_list_context == "chapters":
-            chapter_data = item.data(Qt.ItemDataRole.UserRole)
-            manga_name = self.current_search_results_map.get(self.current_manga_for_chapters_path_word, {}).get("name", "未知漫画")
-            self.statusBar.showMessage(f"准备将《{manga_name}》- {chapter_data.get('name')} 加入下载队列 (功能待实现)", 3000)
-
-    def _display_selected_manga_details(self, current_item):
-        if not current_item or self.results_list_context != "manga_search": return
-        path_word = current_item.data(Qt.ItemDataRole.UserRole); manga_data = self.current_search_results_map.get(path_word)
-        if not manga_data: return
-        self.manga_title_label.setText(manga_data.get("name", "未知标题"))
-        authors = manga_data.get("author", []); author_str = ", ".join([a.get("name","") for a in authors]) if isinstance(authors,list) and authors else "未知"
-        self.manga_author_label.setText(f"作者: {author_str}")
-        self.manga_description_text.setText(manga_data.get("brief", manga_data.get("show_brief", "无简介")) or manga_data.get("comic", {}).get("brief", "无简介"))
-        cover_url = manga_data.get("cover"); self.manga_cover_label.clear(); self.manga_cover_label.setText("正在加载封面...")
+        if not item:
+            return
+            
+        if self.results_list_context == "manga_search":
+            path_word = item.data(Qt.ItemDataRole.UserRole)
+            manga_data = self.current_search_results_map.get(path_word)
+            
+            if not manga_data:
+                return
+                
+            # 先获取章节列表
+            self._fetch_chapters_for_manga(manga_data)
         
-        if cover_url:
-            if cover_url in self.cover_fetch_workers and self.cover_fetch_workers[cover_url].isRunning(): pass
-            headers = config.API_HEADER; proxies = config.PROXIES
-            cover_worker = NetworkWorker(cover_url=cover_url, headers=headers, proxies=proxies)
-            self.cover_fetch_workers[cover_url] = cover_worker
-            cover_worker.cover_ready.connect(self._handle_cover_image)
-            cover_worker.error.connect(self._handle_network_error)
-            cover_worker.finished.connect(lambda url=cover_url: self._clear_cover_worker(url))
-            cover_worker.start()
-        else: self.manga_cover_label.setText("无封面")
-
-    def _fetch_chapters_for_selected_manga(self, item):
-        if self.main_network_worker and self.main_network_worker.isRunning(): self.statusBar.showMessage("请等待当前主网络操作完成...", 3000); return
-        path_word = item.data(Qt.ItemDataRole.UserRole); manga_data = self.current_search_results_map.get(path_word)
-        if not manga_data: return
-        manga_name = manga_data.get("name", path_word); self.statusBar.showMessage(f"正在获取《{manga_name}》的章节列表...", 0); self.results_list_widget.setEnabled(False)
-        api_url_base = INITIAL_SETTINGS.get('api_url'); headers = config.API_HEADER; proxies = config.PROXIES
+    def _fetch_chapters_for_manga(self, manga_data):
+        if self.main_network_worker and self.main_network_worker.isRunning():
+            self.statusBar.showMessage("请等待当前主网络操作完成...", 3000)
+            return
+            
+        path_word = manga_data.get("path_word")
+        manga_name = manga_data.get("name", path_word)
+        
+        self.statusBar.showMessage(f"正在获取《{manga_name}》的章节列表...", 0)
+        self.results_list_widget.setEnabled(False)
+        
+        api_url_base = INITIAL_SETTINGS.get('api_url')
+        headers = config.API_HEADER
+        proxies = config.PROXIES
+        
         chapter_req_info = {'path_word': path_word, 'group': 'default'}
-        self.main_network_worker = NetworkWorker(chapter_request_info=chapter_req_info, api_url_base=api_url_base, headers=headers, proxies=proxies)
-        self.main_network_worker.chapters_ready.connect(self._handle_chapter_results)
+        
+        self.main_network_worker = NetworkWorker(
+            chapter_request_info=chapter_req_info,
+            api_url_base=api_url_base,
+            headers=headers,
+            proxies=proxies
+        )
+        
+        self.main_network_worker.chapters_ready.connect(
+            lambda chapters, path_word=path_word: self._show_chapter_info_dialog(manga_data, chapters)
+        )
         self.main_network_worker.error.connect(self._handle_network_error)
         self.main_network_worker.finished.connect(self._clear_main_network_worker)
         self.main_network_worker.start()
+    
+    def _show_chapter_info_dialog(self, manga_data, chapters):
+        """显示章节信息对话框"""
+        if not chapters:
+            manga_name = manga_data.get("name", "未知漫画")
+            self.statusBar.showMessage(f"《{manga_name}》未找到章节信息或列表为空。", 3000)
+            return
+            
+        # 保存章节数据
+        path_word = manga_data.get("path_word")
+        self.current_manga_chapters_data[path_word] = chapters
+        self.current_manga_for_chapters_path_word = path_word
+        
+        dialog = ChapterInfoDialog(manga_data, chapters, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # 根据用户选择进行下载
+            if dialog.download_type == 'all':
+                self._add_chapters_to_queue(chapters)
+            elif dialog.download_type == 'selected':
+                selected_chapters = [chapters[idx] for idx in dialog.selected_chapter_indices]
+                self._add_chapters_to_queue(selected_chapters)
+                
+        self.tab_widget.setCurrentWidget(self.queue_tab)
 
-    def _handle_chapter_results(self, chapters_list, manga_path_word):
-        self.current_manga_for_chapters_path_word = manga_path_word
-        manga_name = self.current_search_results_map.get(manga_path_word, {}).get("name", manga_path_word)
-        if not chapters_list: self.statusBar.showMessage(f"《{manga_name}》未找到章节信息或列表为空。", 3000); self.results_group_box.setTitle(f"章节列表 - {manga_name} (空)"); return
-        self.statusBar.showMessage(f"成功获取《{manga_name}》的 {len(chapters_list)} 个章节。", 3000)
-        self.results_list_widget.clear(); self.results_list_context = "chapters"; self.results_group_box.setTitle(f"章节列表 - {manga_name}")
-        self.current_manga_chapters_data[manga_path_word] = chapters_list
-        for chapter_data in chapters_list: item = QListWidgetItem(chapter_data.get("name", "未知章节")); item.setData(Qt.ItemDataRole.UserRole, chapter_data); self.results_list_widget.addItem(item)
+    def _display_selected_manga_details(self, current_item):
+        """显示选中漫画的详情"""
+        if not current_item or self.results_list_context != "manga_search":
+            return
+            
+        path_word = current_item.data(Qt.ItemDataRole.UserRole)
+        manga_data = self.current_search_results_map.get(path_word)
+        
+        if not manga_data:
+            return
+            
+        self.manga_title_label.setText(manga_data.get("name", "未知标题"))
+        
+        authors = manga_data.get("author", [])
+        author_str = ", ".join([a.get("name","") for a in authors]) if isinstance(authors,list) and authors else "未知"
+        self.manga_author_label.setText(f"作者: {author_str}")
+        
+        self.manga_description_text.setText(
+            manga_data.get("brief", manga_data.get("show_brief", "无简介")) or 
+            manga_data.get("comic", {}).get("brief", "无简介")
+        )
+        
+        cover_url = manga_data.get("cover")
+        self.manga_cover_label.clear()
+        self.manga_cover_label.setText("正在加载封面...")
+        
+        if cover_url:
+            if cover_url in self.cover_fetch_workers and self.cover_fetch_workers[cover_url].isRunning():
+                pass
+            else:
+                headers = config.API_HEADER
+                proxies = config.PROXIES
+                cover_worker = NetworkWorker(cover_url=cover_url, headers=headers, proxies=proxies)
+                self.cover_fetch_workers[cover_url] = cover_worker
+                cover_worker.cover_ready.connect(self._handle_cover_image)
+                cover_worker.error.connect(self._handle_network_error)
+                cover_worker.finished.connect(lambda url=cover_url: self._clear_cover_worker(url))
+                cover_worker.start()
+        else:
+            self.manga_cover_label.setText("无封面")
 
     def _handle_cover_image(self, pixmap, requested_url):
+        """处理封面图片加载完成"""
         current_selected_item = self.results_list_widget.currentItem()
         if self.results_list_context == "manga_search" and current_selected_item:
             path_word = current_selected_item.data(Qt.ItemDataRole.UserRole)
             manga_data = self.current_search_results_map.get(path_word)
             if manga_data and manga_data.get("cover") == requested_url:
-                scaled_pixmap = pixmap.scaled(self.manga_cover_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                scaled_pixmap = pixmap.scaled(
+                    self.manga_cover_label.size(), 
+                    Qt.AspectRatioMode.KeepAspectRatio, 
+                    Qt.TransformationMode.SmoothTransformation
+                )
                 self.manga_cover_label.setPixmap(scaled_pixmap)
 
     def _handle_network_error(self, error_msg, operation_type):
-        self.statusBar.showMessage(f"{operation_type.capitalize()} 错误: {error_msg}", 5000); print(f"NetErr ({operation_type}): {error_msg}")
-        if operation_type == "chapters" and self.results_list_context == "chapters": self.results_list_context = "manga_search"; self.results_group_box.setTitle("搜索结果 (章节加载失败)")
-        if operation_type == "cover": self.manga_cover_label.setText("封面加载失败")
-
+        """处理网络错误"""
+        self.statusBar.showMessage(f"{operation_type.capitalize()} 错误: {error_msg}", 5000)
+        print(f"网络错误 ({operation_type}): {error_msg}")
+        
+        if operation_type == "chapters" and self.results_list_context == "chapters":
+            self.results_list_context = "manga_search"
+            self.results_group_box.setTitle("搜索结果 (章节加载失败)")
+            
+        if operation_type == "cover":
+            self.manga_cover_label.setText("封面加载失败")
+    
     def _clear_main_network_worker(self):
+        """清理主网络工作线程"""
         self.search_button.setEnabled(True)
         self.results_list_widget.setEnabled(True)
         self.main_network_worker = None
-
+    
     def _clear_cover_worker(self, url):
+        """清理封面加载工作线程"""
         if url in self.cover_fetch_workers:
             del self.cover_fetch_workers[url]
 
-    def _add_selected_chapters_to_download_queue(self):
-        if self.results_list_context != "chapters": self.statusBar.showMessage("请先加载并选择章节。", 3000); return
-        
-        # 获取章节范围输入值
-        range_input = self.chapter_range_input.text().strip()
-        if range_input:
-            # 如果有范围输入，使用范围而不是选择的章节
-            self._add_chapters_by_range(range_input)
-            return
-            
-        selected_items = self.results_list_widget.selectedItems()
-        if not selected_items: self.statusBar.showMessage("未选择任何章节。", 3000); return
-        chapters_to_queue = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items]
-        self._add_chapters_to_queue(chapters_to_queue)
-
-    def _add_all_chapters_to_download_queue(self):
-        if self.results_list_context != "chapters" or not self.current_manga_for_chapters_path_word: self.statusBar.showMessage("请先加载漫画的章节列表。", 3000); return
-        
-        # 获取章节范围输入值
-        range_input = self.chapter_range_input.text().strip()
-        if range_input:
-            # 如果有范围输入，使用范围而不是全部章节
-            self._add_chapters_by_range(range_input)
-            return
-            
-        chapters_to_queue = self.current_manga_chapters_data.get(self.current_manga_for_chapters_path_word, [])
-        self._add_chapters_to_queue(chapters_to_queue)
-        
-    def _add_chapters_by_range(self, range_str):
-        """根据输入的范围字符串(如'1-5,8,10-12')添加章节到下载队列"""
-        if self.results_list_context != "chapters" or not self.current_manga_for_chapters_path_word:
-            self.statusBar.showMessage("请先加载漫画的章节列表。", 3000)
-            return
-            
-        all_chapters = self.current_manga_chapters_data.get(self.current_manga_for_chapters_path_word, [])
-        if not all_chapters:
-            self.statusBar.showMessage("没有可用的章节。", 3000)
-            return
-            
-        try:
-            selected_indices = set()
-            # 解析范围字符串，如 "1-5, 8, 10-12"
-            for part in range_str.split(','):
-                part = part.strip()
-                if '-' in part:
-                    # 处理范围，如 "1-5"
-                    start, end = part.split('-')
-                    start, end = int(start.strip()), int(end.strip())
-                    if start < 1: start = 1
-                    if end > len(all_chapters): end = len(all_chapters)
-                    for i in range(start-1, end):  # 调整为0索引
-                        selected_indices.add(i)
-                else:
-                    # 处理单个数字，如 "8"
-                    idx = int(part.strip()) - 1  # 调整为0索引
-                    if 0 <= idx < len(all_chapters):
-                        selected_indices.add(idx)
-            
-            # 转换为章节列表
-            selected_chapters = [all_chapters[i] for i in sorted(selected_indices) if 0 <= i < len(all_chapters)]
-            
-            if not selected_chapters:
-                self.statusBar.showMessage("指定范围内没有有效章节。", 3000)
-                return
-                
-            self.statusBar.showMessage(f"从范围 '{range_str}' 中选择了 {len(selected_chapters)} 个章节。", 3000)
-            self._add_chapters_to_queue(selected_chapters)
-            
-        except Exception as e:
-            self.statusBar.showMessage(f"解析章节范围时出错: {e}，格式应为如 '1-5, 8'", 5000)
-            print(f"章节范围解析错误: {e}")
-
     def _add_chapters_to_queue(self, chapter_data_list):
-        if not chapter_data_list: return
+        if not chapter_data_list:
+            return
+            
         manga_path_word = self.current_manga_for_chapters_path_word
-        manga_info = self.current_search_results_map.get(manga_path_word, {}); manga_name = manga_info.get("name", manga_path_word)
+        manga_info = self.current_search_results_map.get(manga_path_word, {})
+        manga_name = manga_info.get("name", manga_path_word)
+        
         queued_count = 0
         for chapter_data in chapter_data_list:
             chapter_uuid = chapter_data.get("uuid")
             if chapter_uuid and not any(item[2].get("uuid") == chapter_uuid for item in self.download_queue) and chapter_uuid not in self.active_download_workers:
-                self.download_queue.append((manga_path_word, manga_name, chapter_data)); queued_count +=1
-        if queued_count > 0: self.statusBar.showMessage(f"{queued_count} 个章节已添加到下载队列。", 3000)
-        else: self.statusBar.showMessage("选择的章节已在队列或正在下载中。", 3000)
+                self.download_queue.append((manga_path_word, manga_name, chapter_data))
+                
+                # 添加到队列列表
+                queue_item = QListWidgetItem(
+                    f"《{manga_name}》 - {chapter_data.get('name', '未知章节')} - 等待下载"
+                )
+                queue_item.setData(Qt.ItemDataRole.UserRole, chapter_uuid)
+                self.queue_list.addItem(queue_item)
+                
+                queued_count += 1
+                
+        if queued_count > 0:
+            self.statusBar.showMessage(f"{queued_count} 个章节已添加到下载队列。", 3000)
+            self._log_download_status(f"已添加 {queued_count} 个章节到下载队列")
+        else:
+            self.statusBar.showMessage("选择的章节已在队列或正在下载中。", 3000)
+    
+    def _start_queue_download(self):
+        """开始队列下载"""
+        if not self.download_queue:
+            self.statusBar.showMessage("下载队列为空", 3000)
+            return
+            
+        self.start_queue_button.setEnabled(False)
+        self.pause_queue_button.setEnabled(True)
+        
         self._process_download_queue()
-
+    
+    def _pause_download(self):
+        """暂停下载"""
+        for worker in self.active_download_workers.values():
+            worker.cancel()
+            
+        self.start_queue_button.setEnabled(True)
+        self.pause_queue_button.setEnabled(False)
+        
+        self.statusBar.showMessage("下载已暂停", 3000)
+        self._log_download_status("下载已暂停")
+    
+    def _clear_queue(self):
+        """清空下载队列"""
+        reply = QMessageBox.question(
+            self,
+            "清空队列",
+            "确定要清空下载队列吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.download_queue.clear()
+            self.queue_list.clear()
+            self.statusBar.showMessage("下载队列已清空", 3000)
+            self._log_download_status("下载队列已清空")
+    
     def _process_download_queue(self):
-        if not self.download_queue: return
+        """处理下载队列"""
+        if not self.download_queue:
+            self.pause_queue_button.setEnabled(False)
+            self.start_queue_button.setEnabled(True)
+            self.current_download_label.setText("当前下载: 无")
+            self.download_progress_bar.setValue(0)
+            return
+            
         while self.download_queue and len(self.active_download_workers) < self.max_concurrent_downloads:
-            manga_path_word, manga_name, chapter_data = self.download_queue.pop(0)
+            manga_path_word, manga_name, chapter_data = self.download_queue[0]
             chapter_uuid = chapter_data.get("uuid")
-            if chapter_uuid in self.active_download_workers: continue
+            
+            if chapter_uuid in self.active_download_workers:
+                # 已经在下载，移除并跳过
+                self.download_queue.pop(0)
+                continue
+                
             download_dest_root = self.download_destination_edit.text()
-            if not download_dest_root or not os.path.isdir(download_dest_root): self.statusBar.showMessage(f"错误: 下载目标路径无效: {download_dest_root}", 5000); self.download_queue.insert(0, (manga_path_word, manga_name, chapter_data)); return
-            self.statusBar.showMessage(f"准备下载《{manga_name}》- {chapter_data.get('name')}...", 0)
-            worker = DownloadWorker(manga_name, manga_path_word, chapter_data, download_dest_root, INITIAL_SETTINGS.get('api_url'), config.API_HEADER, config.PROXIES)
-            worker.progress_update.connect(self._handle_download_progress); worker.chapter_complete.connect(self._handle_chapter_download_complete); worker.error.connect(self._handle_download_error)
-            self.active_download_workers[chapter_uuid] = worker; worker.start()
+            
+            if not download_dest_root or not os.path.isdir(download_dest_root):
+                self.statusBar.showMessage(f"错误: 下载目标路径无效: {download_dest_root}", 5000)
+                self._log_download_status(f"错误: 下载目标路径无效: {download_dest_root}")
+                return
+                
+            # 开始下载，但不从队列中移除，直到下载完成
+            chapter_name = chapter_data.get('name', '未知章节')
+            self.statusBar.showMessage(f"准备下载《{manga_name}》- {chapter_name}...", 0)
+            self._log_download_status(f"开始下载: 《{manga_name}》- {chapter_name}")
+            
+            self.current_download_label.setText(f"当前下载: 《{manga_name}》- {chapter_name}")
+            self.download_progress_bar.setValue(0)
+            
+            worker = DownloadWorker(
+                manga_name,
+                manga_path_word,
+                chapter_data,
+                download_dest_root,
+                INITIAL_SETTINGS.get('api_url'),
+                config.API_HEADER,
+                config.PROXIES
+            )
+            
+            worker.progress_update.connect(self._handle_download_progress)
+            worker.chapter_complete.connect(self._handle_chapter_download_complete)
+            worker.error.connect(self._handle_download_error)
+            
+            self.active_download_workers[chapter_uuid] = worker
+            worker.start()
+            
+            # 移除队列中的项目
+            self.download_queue.pop(0)
+            
+            # 更新队列显示
+            for i in range(self.queue_list.count()):
+                item = self.queue_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == chapter_uuid:
+                    self.queue_list.takeItem(i)
+                    break
 
     def _handle_download_progress(self, chapter_uuid, page_num, total_pages):
-        worker_instance = self.active_download_workers.get(chapter_uuid); c_name = worker_instance.chapter_data.get("name") if worker_instance else chapter_uuid
-        self.statusBar.showMessage(f"下载中: {c_name} - {page_num}/{total_pages} 页...", 0)
+        """处理下载进度"""
+        worker_instance = self.active_download_workers.get(chapter_uuid)
+        if not worker_instance:
+            return
+            
+        chapter_name = worker_instance.chapter_data.get("name", "未知章节")
+        manga_name = worker_instance.manga_name
+        
+        progress_percent = int((page_num / total_pages) * 100)
+        self.download_progress_bar.setValue(progress_percent)
+        
+        progress_msg = f"下载中: 《{manga_name}》- {chapter_name} - {page_num}/{total_pages} 页 ({progress_percent}%)"
+        self.statusBar.showMessage(progress_msg, 0)
+        
+        if page_num % 5 == 0 or page_num == total_pages:  # 每5页更新一次日志，减少频繁更新
+            self._log_download_status(progress_msg)
 
     def _handle_chapter_download_complete(self, chapter_uuid, chapter_name, chapter_path, success):
-        if chapter_uuid in self.active_download_workers: del self.active_download_workers[chapter_uuid]
+        """处理章节下载完成"""
+        if chapter_uuid in self.active_download_workers:
+            worker = self.active_download_workers[chapter_uuid]
+            manga_name = worker.manga_name
+            del self.active_download_workers[chapter_uuid]
+            
         if success:
-            self.statusBar.showMessage(f"章节《{chapter_name}》下载完成到: {chapter_path}", 5000)
+            self.statusBar.showMessage(f"章节《{manga_name} - {chapter_name}》下载完成", 5000)
+            self._log_download_status(f"✅ 下载完成: 《{manga_name}》- {chapter_name} 到 {chapter_path}")
+            
             if INITIAL_SETTINGS.get('auto_create_epub_after_download', False):
                 self.statusBar.showMessage(f"《{chapter_name}》下载完成, 准备自动创建EPUB...", 3000)
-                epub_output_folder = self.export_destination_edit.text() or os.path.dirname(chapter_path); os.makedirs(epub_output_folder, exist_ok=True)
-                manga_name_for_epub = os.path.basename(os.path.dirname(chapter_path)); epub_title = f"{manga_name_for_epub} - {chapter_name}"
-                output_epub_filename = f"{INITIAL_SETTINGS.get('epub_filename_prefix', '')}{epub_title}.epub"; output_epub_full_path = os.path.join(epub_output_folder, re.sub(r'[\\/*?"<>|]',"_", output_epub_filename))
-                epub_params = {'epub_title': epub_title, 'language_code': INITIAL_SETTINGS.get('epub_language'), 'target_width_override': INITIAL_SETTINGS.get('epub_target_width') or None, 'target_height_override': INITIAL_SETTINGS.get('epub_target_height') or None, 'epub_author': "Copymanga Downloader", 'processing_mode': 'direct'}
+                self._log_download_status(f"开始自动转换 《{manga_name}》- {chapter_name} 为EPUB...")
+                
+                epub_output_folder = self.export_destination_edit.text() or os.path.dirname(chapter_path)
+                os.makedirs(epub_output_folder, exist_ok=True)
+                
+                manga_name_for_epub = os.path.basename(os.path.dirname(chapter_path))
+                epub_title = f"{manga_name_for_epub} - {chapter_name}"
+                output_epub_filename = f"{INITIAL_SETTINGS.get('epub_filename_prefix', '')}{epub_title}.epub"
+                output_epub_full_path = os.path.join(epub_output_folder, re.sub(r'[\\/*?"<>|]',"_", output_epub_filename))
+                
+                epub_params = {
+                    'epub_title': epub_title,
+                    'language_code': INITIAL_SETTINGS.get('epub_language'),
+                    'target_width_override': INITIAL_SETTINGS.get('epub_target_width') or None,
+                    'target_height_override': INITIAL_SETTINGS.get('epub_target_height') or None,
+                    'epub_author': "Copymanga Downloader",
+                    'processing_mode': 'direct'
+                }
+                
                 auto_delete_for_auto_epub = False
-                self.export_worker = ExportWorker(chapter_path, "EPUB", output_epub_full_path, epub_params, auto_delete_for_auto_epub)
-                self.export_worker.finished.connect(self._on_export_finished); self.export_worker.progress.connect(self._update_export_progress); self.export_worker.start()
-        else: self.statusBar.showMessage(f"章节《{chapter_name}》下载失败或取消。", 5000)
+                self.export_worker = ExportWorker(
+                    chapter_path,
+                    "EPUB",
+                    output_epub_full_path,
+                    epub_params,
+                    auto_delete_for_auto_epub
+                )
+                
+                self.export_worker.finished.connect(self._on_export_finished)
+                self.export_worker.progress.connect(self._update_export_progress)
+                self.export_worker.start()
+        else:
+            self.statusBar.showMessage(f"章节《{chapter_name}》下载失败或取消。", 5000)
+            self._log_download_status(f"❌ 下载失败: 《{manga_name}》- {chapter_name}")
+            
+        # 继续处理队列
         self._process_download_queue()
 
     def _handle_download_error(self, chapter_uuid, chapter_name, error_message):
-        if chapter_uuid in self.active_download_workers: del self.active_download_workers[chapter_uuid]
-        self.statusBar.showMessage(f"下载《{chapter_name}》时出错: {error_message}", 8000); print(f"Download Error for {chapter_name} ({chapter_uuid}): {error_message}")
+        """处理下载错误"""
+        if chapter_uuid in self.active_download_workers:
+            worker = self.active_download_workers[chapter_uuid]
+            manga_name = worker.manga_name
+            del self.active_download_workers[chapter_uuid]
+            
+        self.statusBar.showMessage(f"下载《{chapter_name}》时出错: {error_message}", 8000)
+        self._log_download_status(f"❌ 下载错误: 《{manga_name}》- {chapter_name}: {error_message}")
+        
+        # 继续处理队列
         self._process_download_queue()
+    
+    def _log_download_status(self, message):
+        """记录下载状态到日志"""
+        timestamp = time.strftime('%H:%M:%S')
+        self.download_status_text.append(f"[{timestamp}] {message}")
+        
+        # 自动滚动到底部
+        cursor = self.download_status_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.download_status_text.setTextCursor(cursor)
 
     def _browse_path_for_lineedit(self, line_edit_widget, dialog_title):
         current_path = line_edit_widget.text() or os.path.expanduser("~")
@@ -602,5 +957,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    main_win = MainWindow(); main_win.show()
+    main_win = MainWindow()
+    main_win.show()
     sys.exit(app.exec()) 
