@@ -12,11 +12,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, QHB
 )
 from PyQt6.QtGui import QAction, QPixmap
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
+from utils import get_app_base_dir
 
 
 import manga.config as config
 from manga.settings import load_settings, save_settings
 load_success, load_msg = load_settings()
+print(load_msg)
 
 INITIAL_SETTINGS = config.SETTINGS.copy() if hasattr(config, 'SETTINGS') and config.SETTINGS else {}
 INITIAL_API_HEADER = config.API_HEADER.copy() if hasattr(config, 'API_HEADER') and config.API_HEADER else {}
@@ -24,8 +26,8 @@ INITIAL_PROXIES = config.PROXIES.copy() if hasattr(config, 'PROXIES') and config
 
 def ensure_gui_defaults(settings_dict):
     defaults = {
-        'download_path': os.path.expanduser("~/Downloads/manga"), 
-        'export_path': os.path.expanduser("~/Downloads/manga"), 
+        'download_path': str(get_app_base_dir() / "manga_downloads"), 
+        'export_path': str(get_app_base_dir() / "manga_downloads"), 
         'api_url': "copymanga.site",
         'epub_filename_prefix': "",
         'epub_language': "zh-CN",
@@ -1109,7 +1111,7 @@ class MainWindow(QMainWindow):
         self.download_status_text.setTextCursor(cursor)
 
     def _browse_path_for_lineedit(self, line_edit_widget, dialog_title):
-        current_path = line_edit_widget.text() or os.path.expanduser("~")
+        current_path = line_edit_widget.text() or str(get_app_base_dir())
         path = QFileDialog.getExistingDirectory(self, dialog_title, current_path)
         if path:
             line_edit_widget.setText(path)

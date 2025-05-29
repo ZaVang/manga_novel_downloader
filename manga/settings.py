@@ -1,10 +1,11 @@
 import json
 import os
 import manga.config as config
+from utils import get_app_base_dir
 
 
 def save_settings(settings):
-    settings_path = os.path.join(os.getcwd(), "manga/manga_settings.json")
+    settings_path = os.path.join(get_app_base_dir(), "manga_settings.json")
     # 写入settings.json文件
     with open(settings_path, "w") as f:
         json.dump(settings, f)
@@ -12,7 +13,7 @@ def save_settings(settings):
 
 def load_settings():
     # 获取用户目录的路径
-    settings_path = os.path.join(os.getcwd(), "manga/manga_settings.json")
+    settings_path = os.path.join(get_app_base_dir(), "manga_settings.json")
     # 检查是否有文件
     if not os.path.exists(settings_path):
         return False, "settings.json文件不存在"
@@ -45,4 +46,4 @@ def load_settings():
             "http": settings["proxies"],
             "https": settings["proxies"]
         }
-    return True, None
+    return True, "manga_settings.json文件加载成功"

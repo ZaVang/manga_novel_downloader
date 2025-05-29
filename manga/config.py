@@ -1,8 +1,8 @@
 import datetime
-import os
+from utils import get_app_base_dir
 
 SETTINGS = {
-    "download_path": os.path.expanduser("~/Downloads/manga"),
+    "download_path": str(get_app_base_dir() / "manga_downloads"),
     "authorization": None,
     "use_oversea_cdn": "0",
     "use_webp": "1",

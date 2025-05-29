@@ -10,7 +10,7 @@ from urllib.parse import urljoin, quote
 import concurrent.futures
 from threading import Lock
 from novel.fix_text import fix_all_txt_files
-
+from utils import get_app_base_dir
 
 class Wenku8Downloader:
     def __init__(self, username='2497360927', password='testtest'):
@@ -23,7 +23,7 @@ class Wenku8Downloader:
         })
         self.print_lock = Lock()
         self.search_cache = {}  # Cache for search results
-        self.cover_cache_dir = os.path.join('novel_cache', 'covers')
+        self.cover_cache_dir = os.path.join(get_app_base_dir(), 'novel_cache', 'covers')
         os.makedirs(self.cover_cache_dir, exist_ok=True)
         
         # 尝试登录

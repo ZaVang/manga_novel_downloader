@@ -18,8 +18,14 @@ import time
 
 # 导入您的下载器类
 from novel.main import Wenku8Downloader
-from novel.epub_converter import convert_single_volume, convert_multiple_volumes, txt_to_epub
+from novel.epub_converter import txt_to_epub
 
+from utils import get_app_base_dir
+import novel.config as config
+from novel.settings import load_settings, save_settings
+load_success, load_msg = load_settings()
+print(load_msg)
+INITIAL_SETTINGS = config.SETTINGS.copy() if hasattr(config, 'SETTINGS') and config.SETTINGS else {}
 
 def parse_volume_range(range_text, max_volumes):
     """
@@ -419,12 +425,12 @@ class EpubExportWorker(QThread):
     export_progress = pyqtSignal(str)
     export_finished = pyqtSignal(bool, str)
 
-    def __init__(self, novel_title, author, input_novel_dir, output_epub_dir, mode, parent=None):
+    def __init__(self, novel_title, author, input_novel_dir, mode, parent=None):
         super().__init__(parent)
         self.novel_title = novel_title
         self.author = author
         self.input_novel_dir = input_novel_dir
-        self.output_epub_dir = output_epub_dir
+        self.output_epub_dir = INITIAL_SETTINGS['output_epub_dir']
         self.mode = mode
 
     def run(self):
@@ -455,16 +461,10 @@ class MainWindow(QMainWindow):
         self.current_search_results = []
         self.current_pagination_info = None
         self.download_queue = []
-        self.cover_cache_dir_path = os.path.join(os.getcwd(), 'novel_cache', 'covers')
+        self.cover_cache_dir_path = os.path.join(get_app_base_dir(), 'novel_cache', 'covers')
         
         # 默认设置
-        self.settings = {
-            'username': '2497360927',
-            'password': 'testtest',
-            'output_dir': os.path.expanduser("~/Downloads/novels"),
-            'max_retries': 3,
-            'auto_login': True  # 默认自动登录
-        }
+        self.settings = INITIAL_SETTINGS
         
         self._create_menu_bar()
         self._create_status_bar()
@@ -713,8 +713,7 @@ class MainWindow(QMainWindow):
 
         source_dir_layout = QHBoxLayout()
         self.epub_source_dir_edit = QLineEdit()
-        default_epub_source_dir = os.path.join(self.settings.get('output_dir', os.path.expanduser("~/Downloads/novels")))
-        self.epub_source_dir_edit.setText(default_epub_source_dir)
+        self.epub_source_dir_edit.setText(INITIAL_SETTINGS['output_dir'])
         self.epub_source_dir_edit.setPlaceholderText("选择已下载的小说根目录")
         self.epub_source_dir_edit.textChanged.connect(self._update_epub_novel_title_preview)
         browse_source_button = QPushButton("浏览源...")
@@ -744,9 +743,7 @@ class MainWindow(QMainWindow):
         
         epub_output_dir_layout = QHBoxLayout()
         self.epub_output_dir_edit = QLineEdit()
-        default_epub_out = os.path.join(self.settings.get('output_dir', os.path.expanduser("~/Downloads/novels")))
-        self.epub_output_dir_edit.setText(default_epub_out)
-
+        self.epub_output_dir_edit.setText(INITIAL_SETTINGS['output_epub_dir'])
         browse_epub_output_button = QPushButton("浏览输出...")
         browse_epub_output_button.clicked.connect(self._browse_epub_output_dir)
         epub_output_dir_layout.addWidget(self.epub_output_dir_edit)
@@ -823,6 +820,7 @@ class MainWindow(QMainWindow):
         # 输出目录
         output_dir_layout = QHBoxLayout()
         self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setText(INITIAL_SETTINGS['output_dir'])
         self.browse_output_button = QPushButton("浏览...")
         self.browse_output_button.clicked.connect(self._browse_output_dir)
         
@@ -879,9 +877,12 @@ class MainWindow(QMainWindow):
             'username': self.username_edit.text().strip(),
             'password': self.password_edit.text().strip(),
             'output_dir': self.output_dir_edit.text().strip(),
+            'output_epub_dir': self.epub_output_dir_edit.text().strip(),
             'max_retries': self.max_retries_spinbox.value(),
             'auto_login': self.auto_login_checkbox.isChecked()
         })
+
+        save_settings(self.settings)
         
         # 创建输出目录
         output_dir = self.settings['output_dir']
@@ -892,7 +893,7 @@ class MainWindow(QMainWindow):
     
     def _browse_output_dir(self):
         """浏览输出目录"""
-        current_dir = self.output_dir_edit.text() or os.path.expanduser("~")
+        current_dir = self.output_dir_edit.text() or str(get_app_base_dir())
         directory = QFileDialog.getExistingDirectory(self, "选择输出目录", current_dir)
         if directory:
             self.output_dir_edit.setText(directory)
@@ -1418,7 +1419,7 @@ class MainWindow(QMainWindow):
     
     # EPUB 导出相关方法
     def _browse_epub_source_dir(self):
-        current_dir = self.epub_source_dir_edit.text() or os.path.expanduser("~")
+        current_dir = self.epub_source_dir_edit.text() or str(get_app_base_dir())
         directory = QFileDialog.getExistingDirectory(self, "选择EPUB源目录", current_dir)
         if directory:
             self.epub_source_dir_edit.setText(directory)
@@ -1429,7 +1430,7 @@ class MainWindow(QMainWindow):
              self.epub_novel_title_edit.setText(os.path.basename(text))
 
     def _browse_epub_output_dir(self):
-        current_dir = self.epub_output_dir_edit.text() or os.path.expanduser("~")
+        current_dir = self.epub_output_dir_edit.text() or str(get_app_base_dir())
         directory = QFileDialog.getExistingDirectory(self, "选择EPUB输出目录", current_dir)
         if directory:
             self.epub_output_dir_edit.setText(directory)
@@ -1469,7 +1470,6 @@ class MainWindow(QMainWindow):
             novel_title=novel_title,
             author=author,
             input_novel_dir=input_dir,
-            output_epub_dir=output_dir,
             mode=conversion_mode,
             parent=self
         )
@@ -1535,7 +1535,7 @@ class MainWindow(QMainWindow):
 
     def _clear_novel_cache_directory(self, silent=False):
         """Clears the novel cover cache directory."""
-        cache_dir_to_clear = os.path.join(os.getcwd(), 'novel_cache')
+        cache_dir_to_clear = self.cover_cache_dir_path
         
         if os.path.exists(cache_dir_to_clear):
             try:
