@@ -239,66 +239,12 @@ class EpubExportWorker(QThread):
             self.export_progress.emit(f"输出目录: {self.output_epub_dir}")
             self.export_progress.emit(f"转换模式: {'按卷分别生成 EPUB' if self.mode == 'per_volume' else '合并为单个 EPUB'}")
 
-            # 智能检测文件结构，自动生成正则表达式
-            volume_pattern = self.detect_volume_pattern()
-            if volume_pattern:
-                self.export_progress.emit(f"检测到文件名模式: {volume_pattern}")
-            else:
-                self.export_progress.emit("使用默认文件结构处理")
-
-            if self.mode == "per_volume":
-                convert_single_volume(
-                    base_title=self.novel_title,
-                    author=self.author,
-                    input_dir=self.input_novel_dir,
-                    output_dir=self.output_epub_dir,
-                )
-                self.export_finished.emit(True, f"《{self.novel_title}》按卷 EPUB 转换完成。")
-            elif self.mode == "all_in_one":
-                convert_multiple_volumes(
-                    novel_title=self.novel_title,
-                    author=self.author,
-                    base_dir=self.input_novel_dir,
-                    output_dir=self.output_epub_dir,
-                )
-                self.export_finished.emit(True, f"《{self.novel_title}》合并 EPUB 转换完成。")
-            else:
-                self.export_finished.emit(False, f"未知的转换模式: {self.mode}")
+            txt_to_epub(self.input_novel_dir, self.output_epub_dir, self.novel_title, self.author)
+            self.export_progress.emit(f"转换完成")
 
         except Exception as e:
             self.export_finished.emit(False, f"EPUB 转换过程中发生错误: {e}")
     
-    def detect_volume_pattern(self):
-        """智能检测卷和章节的文件名模式"""
-        try:
-            # 扫描目录结构
-            volume_dirs = []
-            for item in os.listdir(self.input_novel_dir):
-                item_path = os.path.join(self.input_novel_dir, item)
-                if os.path.isdir(item_path):
-                    volume_dirs.append(item)
-            
-            if not volume_dirs:
-                return None
-            
-            # 分析卷目录名称模式
-            # 检查是否有数字编号的TXT文件
-            sample_volume_dir = os.path.join(self.input_novel_dir, volume_dirs[0])
-            txt_files = [f for f in os.listdir(sample_volume_dir) if f.endswith('.txt')]
-            
-            if txt_files:
-                # 检查文件名是否有序号前缀 (如 001_章节名.txt)
-                if re.match(r'^\d{3}_', txt_files[0]):
-                    self.export_progress.emit("检测到有序号前缀的文件结构")
-                    # 对于这种结构，我们需要特殊处理
-                    return None  # 让系统自动处理
-            
-            return None
-            
-        except Exception as e:
-            self.export_progress.emit(f"文件结构检测失败: {e}")
-            return None
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
