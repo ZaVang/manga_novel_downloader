@@ -1,6 +1,6 @@
 import json
 import os
-import config
+import manga.config as config
 
 
 def save_settings(settings):

@@ -1,7 +1,7 @@
 import time
 
-import config
-from settings import save_settings
+import manga.config as config
+from manga.settings import save_settings
 
 
 def is_contains_chinese(strs):

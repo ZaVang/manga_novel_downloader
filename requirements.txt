@@ -2,3 +2,6 @@ rich>=13.3.2
 requests>=2.31.0
 ebooklib>=0.18
 beautifulsoup4>=4.12.2
+PyQt6>=6.4.0
+Pillow>=9.0.0
+lxml>=4.9.0

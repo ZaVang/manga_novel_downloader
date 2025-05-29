@@ -17,8 +17,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 import time
 
 # 导入您的下载器类
-from main import Wenku8Downloader
-from epub_converter import convert_single_volume, convert_multiple_volumes, txt_to_epub
+from novel.main import Wenku8Downloader
+from novel.epub_converter import convert_single_volume, convert_multiple_volumes, txt_to_epub
 
 
 def parse_volume_range(range_text, max_volumes):

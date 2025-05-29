@@ -9,7 +9,7 @@ import time
 from urllib.parse import urljoin, quote
 import concurrent.futures
 from threading import Lock
-from fix_text import fix_all_txt_files
+from novel.fix_text import fix_all_txt_files
 
 
 class Wenku8Downloader:

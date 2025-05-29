@@ -14,8 +14,8 @@ from PyQt6.QtGui import QAction, QPixmap
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
 
 
-import config
-from settings import load_settings, save_settings
+import manga.config as config
+from manga.settings import load_settings, save_settings
 load_success, load_msg = load_settings()
 
 INITIAL_SETTINGS = config.SETTINGS.copy() if hasattr(config, 'SETTINGS') and config.SETTINGS else {}
@@ -50,7 +50,7 @@ _initial_use_oscdn_bool = INITIAL_SETTINGS.get('use_oversea_cdn') == "1"
 
 # Import the EPUB generation utility
 try:
-    from epub_utils import generate_epub_from_folder_content
+    from manga.epub_utils import generate_epub_from_folder_content
 except ImportError:
     print("Error: epub_utils.py not found. EPUB generation will not work.")
     def generate_epub_from_folder_content(*args, **kwargs):
